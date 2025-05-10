@@ -1,0 +1,18 @@
+# Bytecode
+__pycache__/
+*.pyc
+
+# Logs, temporäre Dateien
+tmp/
+*.log
+
+# SQLite-Datenbanken
+*.db
+
+# Excel-/PDF-Dateien
+*.xlsx
+*.pdf
+
+# Streamlit Cache
+.streamlit/
+*.cache/
