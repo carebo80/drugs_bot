@@ -33,9 +33,9 @@ def parse_pdf_to_dataframe(pdf_path):
 
     doc = fitz.open(pdf_path)
     records = []
-    seiten_gesamt = len(doc)
-    lieferanten_set = lade_lieferanten()
     fehler_zeilen = []
+    lieferanten_set = lade_lieferanten()
+    seiten_gesamt = len(doc)
 
     for page_num in range(seiten_gesamt):
         page = doc.load_page(page_num)
@@ -45,65 +45,70 @@ def parse_pdf_to_dataframe(pdf_path):
         for match in matches:
             lines = match.strip().splitlines()
             if len(lines) < 14:
-                continue
+                continue  # zu kurz = keine gültige Medikamentengruppe
 
             artikelzeile = lines[0].strip()
             artikel_split = artikelzeile.split(" ", 1)
             artikelnummer = artikel_split[0] if len(artikel_split) > 1 else ""
             artikeltext = artikel_split[1] if len(artikel_split) > 1 else ""
 
-            datenzeilen = lines[12:]
-            for i in range(0, len(datenzeilen), 11):
-                block = datenzeilen[i:i+11]
-                if len(block) < 11:
-                    block += [""] * (11 - len(block))
+            datenzeilen = lines[12:]  # Bewegungen ab Zeile 13
+            for zeile in datenzeilen:
+                felder = zeile.strip().split()
+                dirty = False
+
+                if len(felder) < 11:
+                    felder += [""] * (11 - len(felder))
+                    dirty = True
+
+                try:
+                    lfdnr, datum, kunde_id, kundenname, arzt_id, arzt_name, lieferant, ein, aus, lager, abh = felder[:11]
+
+                    parts = kundenname.split()
+                    vorname = parts[0] if parts else ''
+                    nachname = ' '.join(parts[1:]) if len(parts) > 1 else ''
+
+                    name_upper = kundenname.upper()
+                    if name_upper in lieferanten_set or lieferant.upper() in lieferanten_set:
+                        final_lieferant = kundenname or lieferant
+                        vorname, nachname = None, None
+                    else:
+                        final_lieferant = lieferant or None
+
+                    records.append({
+                        "dirty": dirty,
+                        "lfdnr": lfdnr,
+                        "datum": datum,
+                        "kunde_id": kunde_id,
+                        "vorname": vorname,
+                        "nachname": nachname,
+                        "arzt_id": arzt_id,
+                        "arzt_name": arzt_name,
+                        "lieferant": final_lieferant,
+                        "ein": ein,
+                        "aus": aus,
+                        "lager": lager,
+                        "abh": abh,
+                        "artikelnummer": artikelnummer,
+                        "artikeltext": artikeltext
+                    })
+
+                except Exception as e:
                     fehler_zeilen.append({
                         "seite": page_num + 1,
                         "artikel": artikelnummer,
-                        "zeilen": block
+                        "zeile": zeile,
+                        "fehler": str(e)
                     })
-
-                block = [line.strip() for line in block]
-                lfdnr, datum, kunde_id, kundenname = block[:4]
-                arzt_id, arzt_name, lieferant = block[4:7]
-                ein, aus, lager, abh = block[7:]
-
-                parts = kundenname.split()
-                vorname = parts[0] if parts else ''
-                nachname = ' '.join(parts[1:]) if len(parts) > 1 else ''
-
-                name_upper = kundenname.upper()
-                if name_upper in lieferanten_set or lieferant.upper() in lieferanten_set:
-                    final_lieferant = kundenname or lieferant
-                    vorname, nachname = None, None
-                else:
-                    final_lieferant = lieferant or None
-
-                records.append({
-                    "dirty": len(block) < 11,
-                    "lfdnr": lfdnr,
-                    "datum": datum,
-                    "kunde_id": kunde_id,
-                    "vorname": vorname,
-                    "nachname": nachname,
-                    "arzt_id": arzt_id,
-                    "arzt_name": arzt_name,
-                    "lieferant": final_lieferant,
-                    "ein": ein,
-                    "aus": aus,
-                    "lager": lager,
-                    "abh": abh,
-                    "artikelnummer": artikelnummer,
-                    "artikeltext": artikeltext
-                })
 
     log(f"Seiten gelesen: {seiten_gesamt}, Bewegungen erkannt: {len(records)}")
     if fehler_zeilen:
-        log(f"⚠️ {len(fehler_zeilen)} unvollständige Zeilen erkannt. Beispiel:")
+        log(f"⚠️ {len(fehler_zeilen)} unvollständige oder fehlerhafte Zeilen erkannt. Beispiel:")
         for fehler in fehler_zeilen[:3]:
-            log(f"Seite {fehler['seite']} – {fehler['artikel']}: {fehler['zeilen']}")
+            log(f"Seite {fehler['seite']} – {fehler['artikel']}: {fehler['zeile']} ({fehler['fehler']})")
 
     return pd.DataFrame(records).fillna('').astype({'dirty': 'bool'})
+
 
 def import_dataframe_to_sqlite(df, db_path):
     conn = sqlite3.connect(db_path)
@@ -142,36 +147,14 @@ def import_dataframe_to_sqlite(df, db_path):
         )
 
         try:
-            update_sql = """
-            UPDATE bewegungen SET
-                artikel_bezeichnung = ?, liste = ?,
-                ein_mge = ?, ein_pack = ?, eingang = ?,
-                aus_mge = ?, aus_pack = ?, ausgang = ?,
-                name = ?, vorname = ?,
-                lieferant = ?, quelle = ?,
-                updated_at = ?, dirty = ?
-            WHERE belegnummer = ? AND datum = ? AND vorname = ? AND name = ?
-            """
-
-            update_data = (
-                row.get("artikeltext"), "b",
-                ein_mge, ein_pack, eingang,
-                aus_mge, aus_pack, ausgang,
-                row.get("nachname"), row.get("vorname"),
-                row.get("lieferant"), "pdf",
-                datetime.now().isoformat(), row.get("dirty"),
-                row.get("artikelnummer"), row.get("datum"), row.get("vorname"), row.get("nachname")
-            )
-
-            cursor.execute(update_sql, update_data)
-            if cursor.rowcount == 0:
-                cursor.execute(insert_sql, daten)
-        except sqlite3.IntegrityError as e:
-            log(f"Fehler beim Import: {e}")
+            cursor.execute(insert_sql, daten)
+        except sqlite3.IntegrityError:
+            log(f"⚠️ Übersprungen (Duplikat?): {row.get('artikelnummer')} am {row.get('datum')}")
 
     conn.commit()
     conn.close()
     log(f"{len(df)} Bewegungen in die Datenbank importiert.")
+
 
 def run_import(pdf_path, db_path="data/laufende_liste.db"):
     df = parse_pdf_to_dataframe(pdf_path)

@@ -16,3 +16,4 @@ tmp/
 # Streamlit Cache
 .streamlit/
 *.cache/
+data/lieferanten.csv
