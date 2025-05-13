@@ -33,9 +33,9 @@ def parse_pdf_to_dataframe(pdf_path):
 
     doc = fitz.open(pdf_path)
     records = []
+    fehler_zeilen = []
     seiten_gesamt = len(doc)
     lieferanten_set = lade_lieferanten()
-    fehler_zeilen = []
 
     for page_num in range(seiten_gesamt):
         page = doc.load_page(page_num)
@@ -53,17 +53,20 @@ def parse_pdf_to_dataframe(pdf_path):
             artikeltext = artikel_split[1] if len(artikel_split) > 1 else ""
 
             datenzeilen = lines[12:]
-            for i in range(0, len(datenzeilen), 11):
+
+            i = 0
+            while i < len(datenzeilen):
                 block = datenzeilen[i:i+11]
                 is_dirty = False
+
                 if len(block) < 11:
                     block += [""] * (11 - len(block))
+                    is_dirty = False  # Letzte Zeile: nicht dirty markieren
+
+                # Prüfung, ob block valide mit Datum startet (Format DD.MM.YYYY oder ähnliches)
+                datum_test = block[1].strip()
+                if not re.match(r"\d{2}\.\d{2}\.\d{4}", datum_test):
                     is_dirty = True
-                    fehler_zeilen.append({
-                        "seite": page_num + 1,
-                        "artikel": artikelnummer,
-                        "zeilen": block
-                    })
 
                 block = [line.strip() for line in block]
                 lfdnr, datum, kunde_id, kundenname = block[:4]
@@ -100,12 +103,16 @@ def parse_pdf_to_dataframe(pdf_path):
                     "artikeltext": artikeltext
                 })
 
+                i += 11
+
     log(f"Seiten gelesen: {seiten_gesamt}, Bewegungen erkannt: {len(records)}")
     if fehler_zeilen:
         log(f"⚠️ {len(fehler_zeilen)} unvollständige Zeilen erkannt. Beispiel:")
         for fehler in fehler_zeilen[:3]:
             log(f"Seite {fehler['seite']} – {fehler['artikel']}: {fehler['zeilen']}")
+
     return pd.DataFrame(records).fillna('').astype({'dirty': 'bool'})
+
 
 def import_dataframe_to_sqlite(df, db_path):
     conn = sqlite3.connect(db_path)
