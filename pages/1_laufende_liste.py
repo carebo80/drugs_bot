@@ -36,15 +36,17 @@ gruppen_saldo = df.groupby("artikel_bezeichnung").agg({
 }).fillna(0)
 gruppen_saldo["saldo_total"] = gruppen_saldo["eingang"] - gruppen_saldo["ausgang"]
 df["total"] = df["eingang"] - df["ausgang"]
+df["dirty"] = df["dirty"].astype(bool)
 
 # 🔄 Daten neu laden
 if st.sidebar.button("🔄 Laufende Liste neu laden"):
     lade_daten.clear()  # Cache löschen
     st.rerun()
 
-# 🔁 Reset-Button
 if st.sidebar.button("🔁 Alle Filter zurücksetzen"):
-    st.session_state.clear()
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
 
 # 🎛️ Sidebar-Filter
 st.sidebar.header("🔍 Filter")
@@ -57,6 +59,7 @@ vorname_filter = st.sidebar.selectbox("🧑 Vorname", ["Alle"] + sorted(df["vorn
 lieferant_filter = st.sidebar.selectbox("🏢 Lieferant", ["Alle"] + sorted(df["lieferant"].dropna().unique()), key="lieferant_filter")
 liste_filter = st.sidebar.selectbox("📋 Liste", ["Alle"] + sorted(df["liste"].dropna().unique()), key="liste_filter")
 quelle_filter = st.sidebar.selectbox("📦 Quelle", ["Alle", "excel", "pdf"], key="quelle_filter")
+dirty_filter = st.sidebar.selectbox("🧪 Dirty", ["Alle", "Ja", "Nein"], key="dirty_filter")
 
 # Datum-Filter
 datum_von = st.sidebar.date_input("📆 Von", value=st.session_state.get("datum_von", None), key="datum_von")
@@ -81,6 +84,11 @@ if datum_von:
     df = df[pd.to_datetime(df["datum"], errors='coerce') >= pd.to_datetime(datum_von)]
 if datum_bis:
     df = df[pd.to_datetime(df["datum"], errors='coerce') <= pd.to_datetime(datum_bis)]
+if dirty_filter == "Ja":
+    df = df[df["dirty"] == True]
+elif dirty_filter == "Nein":
+    df = df[df["dirty"] == False]
+
 
 # 🔢 Pagination: Seitengröße und aktuelle Seite
 page_size = 100
@@ -126,8 +134,9 @@ from st_aggrid import AgGrid, GridOptionsBuilder
 from st_aggrid.shared import GridUpdateMode
 
 gb = GridOptionsBuilder.from_dataframe(anzeige_df)
-gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=100)
 gb.configure_default_column(editable=True, resizable=True)
+gb.configure_grid_options(domLayout='normal')  # vermeidet zu enge Darstellung
+gb.configure_column("artikel_bezeichnung", width=600)
 grid_options = gb.build()
 
 st.subheader("📋 Daten-Tabelle")
@@ -140,6 +149,51 @@ response = AgGrid(
     height=800,
     use_container_width=True
 )
+
+# 💾 Änderungen speichern
+if st.button("💾 Änderungen speichern"):
+    updated_df = pd.DataFrame(response["data"])
+    original_df = anzeige_df.copy()
+
+    # Index und Spalten angleichen
+    updated_df = updated_df[original_df.columns]
+    updated_df.index = original_df.index
+
+    # Nur geänderte Zeilen erkennen
+    changes = updated_df.compare(original_df, keep_shape=True, keep_equal=False)
+
+    if changes.empty:
+        st.info("ℹ️ Keine Änderungen erkannt.")
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        updated_rows = 0
+
+        for idx in changes.index.unique():
+            row = updated_df.loc[idx]
+
+            sql = """
+            UPDATE bewegungen SET
+                artikel_bezeichnung = ?, liste = ?, name = ?, vorname = ?, prirez = ?,
+                lieferant = ?, ls_nummer = ?, ein_mge = ?, ein_pack = ?, eingang = ?,
+                aus_mge = ?, aus_pack = ?, ausgang = ?, total = ?, quelle = ?, ks = ?, dirty = ?
+            WHERE id = ?
+            """
+
+            cursor.execute(sql, (
+                row["artikel_bezeichnung"], row["liste"], row["name"], row["vorname"], row["prirez"],
+                row["lieferant"], row["ls_nummer"], row["ein_mge"], row["ein_pack"], row["eingang"],
+                row["aus_mge"], row["aus_pack"], row["ausgang"], row["total"], row["quelle"], row["ks"], row["dirty"],
+                row["id"]  # <- das ist jetzt der einzige Identifikator
+            ))
+            updated_rows += 1
+
+
+        conn.commit()
+        conn.close()
+        st.success(f"✅ {updated_rows} Zeile(n) erfolgreich aktualisiert.")
+
+
 
 # 📂 CSV Export nur sichtbare Daten
 csv = anzeige_df.to_csv(index=False).encode("utf-8")
