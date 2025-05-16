@@ -29,12 +29,12 @@ gesamt_anzahl = len(df)
 df["eingang"] = pd.to_numeric(df["eingang"], errors="coerce")
 df["ausgang"] = pd.to_numeric(df["ausgang"], errors="coerce")
 
-# 📦 saldo_total: Live-Saldo pro Medikamentenname
+# 📦 total: Live-Saldo pro Medikamentenname
 gruppen_saldo = df.groupby("artikel_bezeichnung").agg({
     "eingang": "sum",
     "ausgang": "sum"
 }).fillna(0)
-gruppen_saldo["saldo_total"] = gruppen_saldo["eingang"] - gruppen_saldo["ausgang"]
+gruppen_saldo["total"] = gruppen_saldo["eingang"] - gruppen_saldo["ausgang"]
 df["total"] = df["eingang"] - df["ausgang"]
 df["dirty"] = df["dirty"].astype(bool)
 
@@ -122,21 +122,45 @@ st.info(f"🔍 Zeige {len(df)} von {gesamt_anzahl} Gesamteinträgen")
 
 # 📊 Tabelle anzeigen mit AgGrid
 columns = [
-    "belegnummer", "artikel_bezeichnung", "liste", "datum",
+    "id", "belegnummer", "artikel_bezeichnung", "liste", "datum",
     "name", "vorname", "prirez", "lieferant", "ls_nummer",
     "ein_mge", "ein_pack", "eingang", "aus_mge", "aus_pack", "ausgang",
     "total", "quelle", "ks", "dirty"
 ]
 
+    
 anzeige_df = df_page[columns].copy()
+
+# Originaldaten für Vergleich sichern (rohe Daten, kein Format)
+st.session_state["original_df_page"] = df_page[columns].copy()
 
 from st_aggrid import AgGrid, GridOptionsBuilder
 from st_aggrid.shared import GridUpdateMode
 
 gb = GridOptionsBuilder.from_dataframe(anzeige_df)
-gb.configure_default_column(editable=True, resizable=True)
+# gb.configure_default_column(editable=True, resizable=True)
+gb.configure_column("id", editable=False, hide=False)
+gb.configure_column("ks", editable=False, hide=False)
+gb.configure_column("belegnummer", editable=True, resizable=True)
+gb.configure_column("artikel_bezeichnung", editable=True, width=600, resizable=True)
+gb.configure_column("liste", editable=True, resizable=True)
+gb.configure_column("datum", editable=True, resizable=True, type=["textColumn"])
+gb.configure_column("name", editable=True, resizable=True)
+gb.configure_column("vorname", editable=True, resizable=True)
+gb.configure_column("prirez", editable=True, resizable=True)
+gb.configure_column("lieferant", editable=True, resizable=True)
+gb.configure_column("ls_nummer", editable=True, resizable=True)
+gb.configure_column("ein_mge", editable=True, resizable=True)
+gb.configure_column("ein_pack", editable=True, resizable=True)
+gb.configure_column("eingang", editable=True, resizable=True)
+gb.configure_column("aus_mge", editable=True, resizable=True)
+gb.configure_column("aus_pack", editable=True, resizable=True)
+gb.configure_column("ausgang", editable=True, resizable=True)
+gb.configure_column("total", editable=True, resizable=True)
+gb.configure_column("quelle", editable=True, resizable=True)
+gb.configure_column("dirty", editable=True, resizable=True)
+
 gb.configure_grid_options(domLayout='normal')  # vermeidet zu enge Darstellung
-gb.configure_column("artikel_bezeichnung", width=600)
 grid_options = gb.build()
 
 st.subheader("📋 Daten-Tabelle")
@@ -147,53 +171,89 @@ response = AgGrid(
     allow_unsafe_jscode=True,
     fit_columns_on_grid_load=True,
     height=800,
-    use_container_width=True
+    use_container_width=True,
+    reload_data=True
 )
 
-# 💾 Änderungen speichern
+# Originaldaten merken
+if "original_df_page" not in st.session_state:
+    st.session_state["original_df_page"] = df_page[columns].copy()
+
+
 if st.button("💾 Änderungen speichern"):
     updated_df = pd.DataFrame(response["data"])
-    original_df = anzeige_df.copy()
+    original_df = st.session_state.get("original_df_page")
 
-    # Index und Spalten angleichen
-    updated_df = updated_df[original_df.columns]
-    updated_df.index = original_df.index
-
-    # Nur geänderte Zeilen erkennen
-    changes = updated_df.compare(original_df, keep_shape=True, keep_equal=False)
-
-    if changes.empty:
-        st.info("ℹ️ Keine Änderungen erkannt.")
+    if original_df is None or updated_df is None:
+        st.warning("⚠️ Vergleich nicht möglich – Originaldaten fehlen.")
     else:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        updated_rows = 0
+        def normalize(val):
+            if pd.isna(val):
+                return ""
+            if isinstance(val, (pd.Timestamp, date)):
+                return val.strftime("%Y-%m-%d")
+            try:
+                parsed = pd.to_datetime(val, dayfirst=True, errors="coerce")
+                if pd.notna(parsed):
+                    return parsed.strftime("%Y-%m-%d")
+            except:
+                pass
+            return str(val).strip()
 
-        for idx in changes.index.unique():
-            row = updated_df.loc[idx]
+        changed_rows = []
 
-            sql = """
-            UPDATE bewegungen SET
-                artikel_bezeichnung = ?, liste = ?, name = ?, vorname = ?, prirez = ?,
-                lieferant = ?, ls_nummer = ?, ein_mge = ?, ein_pack = ?, eingang = ?,
-                aus_mge = ?, aus_pack = ?, ausgang = ?, total = ?, quelle = ?, ks = ?, dirty = ?
-            WHERE id = ?
-            """
+        for i, updated_row in updated_df.iterrows():
+            row_id = updated_row["id"]
+            original_row = original_df[original_df["id"] == row_id]
+            if original_row.empty:
+                continue
+            original_row = original_row.iloc[0]
 
-            cursor.execute(sql, (
-                row["artikel_bezeichnung"], row["liste"], row["name"], row["vorname"], row["prirez"],
-                row["lieferant"], row["ls_nummer"], row["ein_mge"], row["ein_pack"], row["eingang"],
-                row["aus_mge"], row["aus_pack"], row["ausgang"], row["total"], row["quelle"], row["ks"], row["dirty"],
-                row["id"]  # <- das ist jetzt der einzige Identifikator
-            ))
-            updated_rows += 1
+            row_changed = False
+            for col in updated_df.columns:
+                if col == "id":
+                    continue
 
+                val_old = normalize(original_row[col])
+                val_new = normalize(updated_row[col])
 
-        conn.commit()
-        conn.close()
-        st.success(f"✅ {updated_rows} Zeile(n) erfolgreich aktualisiert.")
+                if val_old != val_new:
+                    st.write(f"🆔 Änderung erkannt bei ID {row_id} – Spalte: {col}")
+                    st.write(f"  ALT: '{val_old}' | NEU: '{val_new}'")
+                    row_changed = True
+                    break
 
+            if row_changed:
+                changed_rows.append(updated_row.to_dict())
 
+        # Änderungen anzeigen
+        st.write(f"🧾 Änderungen erkannt: {len(changed_rows)}")
+        if changed_rows:
+            st.dataframe(pd.DataFrame(changed_rows))
+
+        # Speichern in DB
+        if changed_rows:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            for row in changed_rows:
+                sql = """
+                UPDATE bewegungen SET
+                    belegnummer = ?, artikel_bezeichnung = ?, liste = ?, datum = ?, name = ?, vorname = ?, prirez = ?,
+                    lieferant = ?, ls_nummer = ?, ein_mge = ?, ein_pack = ?, eingang = ?,
+                    aus_mge = ?, aus_pack = ?, ausgang = ?, total = ?, quelle = ?, ks = ?, dirty = ?
+                WHERE id = ?
+                """
+                cursor.execute(sql, (
+                    row["belegnummer"], row["artikel_bezeichnung"], row["liste"], row["datum"], row["name"],
+                    row["vorname"], row["prirez"], row["lieferant"], row["ls_nummer"], row["ein_mge"], row["ein_pack"],
+                    row["eingang"], row["aus_mge"], row["aus_pack"], row["ausgang"], row["total"],
+                    row["quelle"], row["ks"], row["dirty"], row["id"]
+                ))
+            conn.commit()
+            conn.close()
+            st.success(f"✅ {len(changed_rows)} Zeile(n) erfolgreich aktualisiert.")
+        else:
+            st.info("ℹ️ Keine Änderungen erkannt.")
 
 # 📂 CSV Export nur sichtbare Daten
 csv = anzeige_df.to_csv(index=False).encode("utf-8")
