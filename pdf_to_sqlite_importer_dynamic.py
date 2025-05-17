@@ -7,6 +7,7 @@ from datetime import datetime
 
 LOG_PATH = "tmp/import.log"
 LIEFERANTEN_CSV = "data/lieferanten.csv"
+WHITELIST_CSV = "data/whitelist.csv"
 
 def log(message):
     timestamp = datetime.now().isoformat()
@@ -20,6 +21,14 @@ def lade_lieferanten():
         return set(df["name"].dropna().str.upper())
     except Exception as e:
         log(f"⚠️ Fehler beim Laden der Lieferantenliste: {e}")
+        return set()
+
+def lade_whitelist():
+    try:
+        df = pd.read_csv(WHITELIST_CSV)
+        return set(df["name"].dropna().str.upper())
+    except Exception as e:
+        log(f"⚠️ Fehler beim Laden der Whitelist: {e}")
         return set()
 
 def extract_pack_size(text):
@@ -36,6 +45,7 @@ def parse_pdf_to_dataframe(pdf_path):
     fehler_zeilen = []
     seiten_gesamt = len(doc)
     lieferanten_set = lade_lieferanten()
+    whitelist_set = lade_whitelist()
 
     for page_num in range(seiten_gesamt):
         page = doc.load_page(page_num)
@@ -53,36 +63,50 @@ def parse_pdf_to_dataframe(pdf_path):
             artikeltext = artikel_split[1] if len(artikel_split) > 1 else ""
 
             datenzeilen = lines[12:]
-
             i = 0
             while i < len(datenzeilen):
                 block = datenzeilen[i:i+11]
                 is_dirty = False
 
+                # Reparatur für block mit verschobenen Zeilen (z.B. "Abschreibunge\nn")
+                if len(block) >= 5 and len(block[4]) <= 2 and len(block[3].split()) >= 1:
+                    block[3] += " " + block[4]
+                    del block[4]
+
                 if len(block) < 11:
                     block += [""] * (11 - len(block))
-                    is_dirty = False  # Letzte Zeile: nicht dirty markieren
+                    is_dirty = True
 
-                # Prüfung, ob block valide mit Datum startet (Format DD.MM.YYYY oder ähnliches)
                 datum_test = block[1].strip()
                 if not re.match(r"\d{2}\.\d{2}\.\d{4}", datum_test):
                     is_dirty = True
 
                 block = [line.strip() for line in block]
+
+                if len(block) != 11:
+                    log(f"❗ Fehlerhafte Zeile auf Seite {page_num+1}: {block}")
+                    fehler_zeilen.append({"seite": page_num+1, "artikel": artikeltext, "zeilen": block})
+                    i += 11
+                    continue
+
                 lfdnr, datum, kunde_id, kundenname = block[:4]
                 arzt_id, arzt_name, lieferant = block[4:7]
                 ein, aus, lager, abh = block[7:]
 
-                parts = kundenname.split()
-                vorname = parts[0] if parts else ''
-                nachname = ' '.join(parts[1:]) if len(parts) > 1 else ''
-
-                # Lieferantenerkennung
                 name_upper = kundenname.upper()
-                if name_upper in lieferanten_set or lieferant.upper() in lieferanten_set:
+                lieferant_upper = lieferant.upper()
+
+                if any(w in name_upper for w in whitelist_set):
+                    vorname = kundenname
+                    nachname = ""
+                    final_lieferant = lieferant
+                elif name_upper in lieferanten_set or lieferant_upper in lieferanten_set:
                     final_lieferant = kundenname or lieferant
-                    vorname, nachname = None, None
+                    vorname = nachname = None
                 else:
+                    parts = kundenname.split()
+                    vorname = parts[0] if parts else ''
+                    nachname = ' '.join(parts[1:]) if len(parts) > 1 else ''
                     final_lieferant = lieferant or None
 
                 records.append({
@@ -112,7 +136,6 @@ def parse_pdf_to_dataframe(pdf_path):
             log(f"Seite {fehler['seite']} – {fehler['artikel']}: {fehler['zeilen']}")
 
     return pd.DataFrame(records).fillna('').astype({'dirty': 'bool'})
-
 
 def import_dataframe_to_sqlite(df, db_path):
     conn = sqlite3.connect(db_path)
@@ -150,7 +173,6 @@ def import_dataframe_to_sqlite(df, db_path):
             datetime.now().isoformat(), datetime.now().isoformat(), row.get("dirty"), None
         )
 
-        # Ersetze einfach durch:
         try:
             cursor.execute(insert_sql, daten)
         except sqlite3.IntegrityError as e:
