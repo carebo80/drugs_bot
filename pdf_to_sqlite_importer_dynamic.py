@@ -1,6 +1,7 @@
 import fitz  # PyMuPDF
 import re
 import os
+import shutil
 import sqlite3
 import pandas as pd
 from datetime import datetime
@@ -9,43 +10,43 @@ LOG_PATH = "tmp/import.log"
 LIEFERANTEN_CSV = "data/lieferanten.csv"
 WHITELIST_CSV = "data/whitelist.csv"
 
+
 def log(message):
     timestamp = datetime.now().isoformat()
     with open(LOG_PATH, "a", encoding="utf-8") as log_file:
         log_file.write(f"[{timestamp}] {message}\n")
     print(message)
 
-def lade_lieferanten():
+
+def lade_liste(pfad):
     try:
-        df = pd.read_csv(LIEFERANTEN_CSV)
+        df = pd.read_csv(pfad)
         return set(df["name"].dropna().str.upper())
     except Exception as e:
-        log(f"⚠️ Fehler beim Laden der Lieferantenliste: {e}")
+        log(f"⚠️ Fehler beim Laden von {pfad}: {e}")
         return set()
 
-def lade_whitelist():
-    try:
-        df = pd.read_csv(WHITELIST_CSV)
-        return set(df["name"].dropna().str.upper())
-    except Exception as e:
-        log(f"⚠️ Fehler beim Laden der Whitelist: {e}")
-        return set()
 
 def extract_pack_size(text):
     match = re.search(r"(\d+)\s*STK", str(text).upper())
     return int(match.group(1)) if match else 1
+
+
+def ist_zahl(text):
+    return bool(re.fullmatch(r"-?\d+([.,]\d+)?", text.strip()))
+
 
 def parse_pdf_to_dataframe(pdf_path):
     if not os.path.isfile(pdf_path):
         log(f"PDF nicht gefunden: {pdf_path}")
         return pd.DataFrame()
 
+    lieferanten_set = lade_liste(LIEFERANTEN_CSV)
+    whitelist_set = lade_liste(WHITELIST_CSV)
+
     doc = fitz.open(pdf_path)
     records = []
-    fehler_zeilen = []
     seiten_gesamt = len(doc)
-    lieferanten_set = lade_lieferanten()
-    whitelist_set = lade_whitelist()
 
     for page_num in range(seiten_gesamt):
         page = doc.load_page(page_num)
@@ -68,54 +69,49 @@ def parse_pdf_to_dataframe(pdf_path):
                 block = datenzeilen[i:i+11]
                 is_dirty = False
 
-                # Reparatur für block mit verschobenen Zeilen (z.B. "Abschreibunge\nn")
-                if len(block) >= 5 and len(block[4]) <= 2 and len(block[3].split()) >= 1:
-                    block[3] += " " + block[4]
-                    del block[4]
-
                 if len(block) < 11:
                     block += [""] * (11 - len(block))
                     is_dirty = True
 
-                datum_test = block[1].strip()
-                if not re.match(r"\d{2}\.\d{2}\.\d{4}", datum_test):
-                    is_dirty = True
-
                 block = [line.strip() for line in block]
-
-                if len(block) != 11:
-                    log(f"❗ Fehlerhafte Zeile auf Seite {page_num+1}: {block}")
-                    fehler_zeilen.append({"seite": page_num+1, "artikel": artikeltext, "zeilen": block})
-                    i += 11
-                    continue
-
                 lfdnr, datum, kunde_id, kundenname = block[:4]
                 arzt_id, arzt_name, lieferant = block[4:7]
                 ein, aus, lager, abh = block[7:]
+
+                if not lfdnr.strip() and not datum.strip():
+                    is_dirty = True
+
+                if not re.match(r"\d{2}\.\d{2}\.\d{4}", datum):
+                    is_dirty = True
+
+                for feld in [ein, aus]:
+                    if feld and not ist_zahl(feld):
+                        is_dirty = True
 
                 name_upper = kundenname.upper()
                 lieferant_upper = lieferant.upper()
 
                 if any(w in name_upper for w in whitelist_set):
-                    vorname = kundenname
-                    nachname = ""
+                    name = kundenname.strip()
                     final_lieferant = lieferant
                 elif name_upper in lieferanten_set or lieferant_upper in lieferanten_set:
+                    name = ""
                     final_lieferant = kundenname or lieferant
-                    vorname = nachname = None
                 else:
-                    parts = kundenname.split()
-                    vorname = parts[0] if parts else ''
-                    nachname = ' '.join(parts[1:]) if len(parts) > 1 else ''
+                    name = kundenname.strip()
                     final_lieferant = lieferant or None
+
+                # Retoure-Logik: Kunde + ein => aus = -ein
+                if name and ist_zahl(ein) and not ist_zahl(aus):
+                    aus = str(-int(ein))
 
                 records.append({
                     "dirty": is_dirty,
                     "lfdnr": lfdnr,
                     "datum": datum,
                     "kunde_id": kunde_id,
-                    "vorname": vorname,
-                    "nachname": nachname,
+                    "vorname": "",
+                    "nachname": name,
                     "arzt_id": arzt_id,
                     "arzt_name": arzt_name,
                     "lieferant": final_lieferant,
@@ -129,13 +125,11 @@ def parse_pdf_to_dataframe(pdf_path):
 
                 i += 11
 
+    df = pd.DataFrame(records).fillna('').astype({'dirty': 'bool'})
     log(f"Seiten gelesen: {seiten_gesamt}, Bewegungen erkannt: {len(records)}")
-    if fehler_zeilen:
-        log(f"⚠️ {len(fehler_zeilen)} unvollständige Zeilen erkannt. Beispiel:")
-        for fehler in fehler_zeilen[:3]:
-            log(f"Seite {fehler['seite']} – {fehler['artikel']}: {fehler['zeilen']}")
+    log(f"Davon dirty: {df['dirty'].sum()}, clean: {len(df) - df['dirty'].sum()}")
+    return df
 
-    return pd.DataFrame(records).fillna('').astype({'dirty': 'bool'})
 
 def import_dataframe_to_sqlite(df, db_path):
     conn = sqlite3.connect(db_path)
@@ -155,8 +149,8 @@ def import_dataframe_to_sqlite(df, db_path):
 
         ein_raw = str(row["ein"]).strip()
         aus_raw = str(row["aus"]).strip()
-        ein_mge = int(ein_raw) if ein_raw.isdigit() else None
-        aus_mge = int(aus_raw) if aus_raw.isdigit() else None
+        ein_mge = int(ein_raw) if ist_zahl(ein_raw) else None
+        aus_mge = int(aus_raw) if ist_zahl(aus_raw) else None
 
         pack_size = extract_pack_size(row.get("artikeltext", ""))
         ein_pack = pack_size if ein_mge is not None else None
@@ -182,10 +176,19 @@ def import_dataframe_to_sqlite(df, db_path):
     conn.close()
     log(f"{len(df)} Bewegungen in die Datenbank importiert.")
 
+
 def run_import(pdf_path, db_path="data/laufende_liste.db"):
     df = parse_pdf_to_dataframe(pdf_path)
     if not df.empty and "artikeltext" in df.columns:
         df = df[df["artikeltext"].notnull() & (df["artikeltext"].str.strip() != "")]
         import_dataframe_to_sqlite(df, db_path)
+        try:
+            timestamp = datetime.now().strftime("_%Y%m%d-%H%M%S")
+            backup_path = pdf_path + timestamp + ".bak"
+            shutil.copy2(pdf_path, backup_path)
+            os.remove(pdf_path)
+            log(f"✅ PDF-Datei gesichert als {backup_path} und gelöscht: {pdf_path}")
+        except Exception as e:
+            log(f"⚠️ Fehler beim Löschen/Sichern der Datei {pdf_path}: {e}")
     else:
         log("Keine gültigen Bewegungen gefunden – kein Import durchgeführt.")
