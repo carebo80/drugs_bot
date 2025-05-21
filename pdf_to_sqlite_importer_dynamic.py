@@ -71,29 +71,7 @@ def parse_pdf_to_dataframe(pdf_path):
                     block = [line.strip() for line in block]
                     lfdnr, datum, kunde_id, kundenname = block[:4]
                     arzt_id, arzt_name, lieferant = block[4:7]
-                    ein, aus, lager, abh = block[7], block[8], block[9], block[10]
-
-                    if not lfdnr.strip() or not datum.strip():
-                        is_dirty = True
-
-                    if not re.match(r"\d{2}\.\d{2}\.\d{4}", datum):
-                        is_dirty = True
-
-                    for feld in [ein, aus]:
-                        if feld and not ist_zahl(feld):
-                            is_dirty = True
-
-                    if not ein.strip() and not aus.strip():
-                        is_dirty = True
-                        log(f"⚠️ Warnung: Ein UND Aus leer bei Lfdnr {lfdnr} auf Seite {page_num + 1}")
-
-                    if ist_zahl(ein) and ist_zahl(aus):
-                        try:
-                            if int(ein) > 0 and int(aus) > 0:
-                                is_dirty = True
-                                log(f"⚠️ Warnung: Ein UND Aus positiv bei Lfdnr {lfdnr} auf Seite {page_num + 1}")
-                        except:
-                            pass
+                    rest = block[7:]
 
                     name_upper = kundenname.upper()
                     lieferant_upper = lieferant.upper()
@@ -108,10 +86,26 @@ def parse_pdf_to_dataframe(pdf_path):
                         name = kundenname.strip()
                         final_lieferant = lieferant or None
 
-                    # Retoure-Regel mit Korrektur: Nur aus setzen, ein löschen
-                    if name and ist_zahl(ein) and not ist_zahl(aus):
-                        aus = str(-int(ein))
-                        ein = ""
+                    # Zahlen rückwärts suchen
+                    zahlen_idx = [j for j in range(len(rest)) if ist_zahl(rest[j])]
+                    lager = rest[zahlen_idx[-1]] if len(zahlen_idx) >= 1 else ""
+                    bewegung = rest[zahlen_idx[-2]] if len(zahlen_idx) >= 2 else ""
+
+                    # Abstände zählen
+                    aus = ein = ""
+                    if len(zahlen_idx) >= 2:
+                        abstand = zahlen_idx[-1] - zahlen_idx[-2] - 1
+                        if abstand == 0:
+                            aus = bewegung
+                        elif abstand == 1:
+                            ein = bewegung
+                        else:
+                            is_dirty = True
+                    else:
+                        is_dirty = True
+
+                    if not lfdnr.strip() or not datum.strip() or not re.match(r"\d{2}\.\d{2}\.\d{4}", datum):
+                        is_dirty = True
 
                     records.append({
                         "dirty": is_dirty,
@@ -126,7 +120,7 @@ def parse_pdf_to_dataframe(pdf_path):
                         "ein": ein,
                         "aus": aus,
                         "lager": lager,
-                        "abh": abh,
+                        "abh": "",
                         "artikelnummer": artikelnummer,
                         "artikeltext": artikeltext
                     })

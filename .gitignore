@@ -13,7 +13,10 @@ tmp/
 *.xlsx
 *.pdf
 
+# Upload-Verzeichnis und Backup-Dateien ausschließen
+upload/
+*.bak
+
 # Streamlit Cache
 .streamlit/
 *.cache/
-data/lieferanten.csv
