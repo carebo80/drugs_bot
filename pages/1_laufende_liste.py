@@ -17,11 +17,36 @@ def lade_daten():
     conn.close()
     return df
 
+def neue_zeile_anlegen():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    sql = """
+        INSERT INTO bewegungen (
+            belegnummer, artikel_bezeichnung, liste, datum,
+            ein_mge, ein_pack, eingang,
+            aus_mge, aus_pack, ausgang,
+            name, vorname, prirez, lieferant, ls_nummer,
+            quelle, dirty, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """
+    jetzt = pd.Timestamp.now().isoformat()
+    daten = ("", "", "", "", None, None, None, None, None, None, "", "", "", "", "", "manuell", True, jetzt, jetzt)
+    cursor.execute(sql, daten)
+    conn.commit()
+    neue_id = cursor.lastrowid
+    conn.close()
+    return neue_id
+
 st.set_page_config(page_title="💊 Laufende Liste", layout="wide")
 st.title("💊 Laufende Liste – Übersicht & Bearbeitung")
 
 df = lade_daten()
 gesamt_anzahl = len(df)
+
+if st.button("➕ Neue Zeile hinzufügen"):
+    neue_id = neue_zeile_anlegen()
+    lade_daten.clear()
+    st.rerun()
 
 df["eingang"] = pd.to_numeric(df["eingang"], errors="coerce")
 df["ausgang"] = pd.to_numeric(df["ausgang"], errors="coerce")
@@ -52,7 +77,7 @@ name_filter = st.sidebar.selectbox("👤 Name", ["Alle"] + sorted(df["name"].dro
 vorname_filter = st.sidebar.selectbox("🧑 Vorname", ["Alle"] + sorted(df["vorname"].dropna().unique()), key="vorname_filter")
 lieferant_filter = st.sidebar.selectbox("🏢 Lieferant", ["Alle"] + sorted(df["lieferant"].dropna().unique()), key="lieferant_filter")
 liste_filter = st.sidebar.selectbox("📋 Liste", ["Alle"] + sorted(df["liste"].dropna().unique()), key="liste_filter")
-quelle_filter = st.sidebar.selectbox("📦 Quelle", ["Alle", "excel", "pdf"], key="quelle_filter")
+quelle_filter = st.sidebar.selectbox("📦 Quelle", ["Alle", "excel", "pdf", "manuell"], key="quelle_filter")
 dirty_filter = st.sidebar.selectbox("🧪 Dirty", ["Alle", "Ja", "Nein"], key="dirty_filter")
 
 datum_von = st.sidebar.date_input("📆 Von", value=st.session_state.get("datum_von", None), key="datum_von")
@@ -113,14 +138,115 @@ columns = [
 anzeige_df = df_page[columns].copy()
 st.session_state["original_df_page"] = anzeige_df.copy()
 
-from st_aggrid import AgGrid, GridOptionsBuilder
-from st_aggrid.shared import GridUpdateMode
-
 gb = GridOptionsBuilder.from_dataframe(anzeige_df)
 gb.configure_column("id", editable=False)
 gb.configure_default_column(editable=True, resizable=True)
-
 grid_options = gb.build()
+
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("❌ Markierte Zeilen löschen") and selected_rows:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        for row in selected_rows:
+            cursor.execute("DELETE FROM bewegungen WHERE id = ?", (row["id"],))
+        conn.commit()
+        conn.close()
+        st.success(f"🗑️ {len(selected_rows)} Zeile(n) gelöscht.")
+        st.rerun()
+
+with col2:
+    if st.button("✅ Markierte Zeilen markieren") and selected_rows:
+        anzeige_df.loc[selected_rows, "dirty"] = True
+        st.session_state["original_df_page"] = anzeige_df.copy()
+        st.success(f"✅ {len(selected_rows)} Zeile(n) markiert.")
+        st.rerun()
+col3, col4 = st.columns(2)
+with col3:        
+    if st.button("🔁 Markierte Zeile duplizieren") and selected_rows:
+        row = selected_rows[0]
+        new_row = row.copy()
+        new_row["id"] = None
+        new_row["dirty"] = True
+        new_row["quelle"] = "manuell"
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cols = ", ".join([k for k in new_row if k != "id"])
+        placeholders = ", ".join(["?"] * len([k for k in new_row if k != "id"]))
+        sql = f"INSERT INTO bewegungen ({cols}) VALUES ({placeholders})"
+        cursor.execute(sql, tuple(new_row[k] for k in new_row if k != "id"))
+        conn.commit()
+        conn.close()
+        st.success("✅ Zeile dupliziert.")
+        st.rerun()
+
+with col4:
+    if st.button("📏 Änderungen speichern"):
+        updated_df = pd.DataFrame(response["data"])
+        original_df = st.session_state.get("original_df_page")
+
+        if original_df is None:
+            st.warning("⚠️ Vergleich nicht möglich – Originaldaten fehlen.")
+        else:
+            def normalize(val):
+                if pd.isna(val):
+                    return ""
+                if isinstance(val, (pd.Timestamp, date)):
+                    return val.strftime("%Y-%m-%d")
+                val = str(val).strip()
+                try:
+                    parsed = pd.to_datetime(val, dayfirst=True, errors="coerce")
+                    if pd.notna(parsed):
+                        return parsed.strftime("%Y-%m-%d")
+                except:
+                    pass
+                return val
+
+            changed_rows = []
+
+            for i, updated_row in updated_df.iterrows():
+                row_id = updated_row["id"]
+                orig_row = original_df[original_df["id"] == row_id]
+                if orig_row.empty:
+                    continue
+                orig_row = orig_row.iloc[0]
+
+                row_changed = any(
+                    normalize(updated_row[col]) != normalize(orig_row[col])
+                    for col in updated_df.columns if col != "id"
+                )
+
+                if row_changed:
+                    changed_rows.append(updated_row.to_dict())
+
+            st.write(f"📓 Geänderte Zeilen: {len(changed_rows)}")
+
+            if changed_rows:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                for row in changed_rows:
+                    sql = """
+                    UPDATE bewegungen SET
+                        belegnummer = ?, artikel_bezeichnung = ?, liste = ?, datum = ?, name = ?, vorname = ?, prirez = ?,
+                        lieferant = ?, ls_nummer = ?, ein_mge = ?, ein_pack = ?, eingang = ?,
+                        aus_mge = ?, aus_pack = ?, ausgang = ?, total = ?, quelle = ?, ks = ?, dirty = ?
+                    WHERE id = ?
+                    """
+                    cursor.execute(sql, (
+                        row["belegnummer"], row["artikel_bezeichnung"], row["liste"], row["datum"], row["name"],
+                        row["vorname"], row["prirez"], row["lieferant"], row["ls_nummer"], row["ein_mge"], row["ein_pack"],
+                        row["eingang"], row["aus_mge"], row["aus_pack"], row["ausgang"], row["total"],
+                        row["quelle"], row["ks"], row["dirty"], row["id"]
+                    ))
+                conn.commit()
+                conn.close()
+                st.success(f"✅ {len(changed_rows)} Zeile(n) erfolgreich aktualisiert.")
+            else:
+                st.info("ℹ️ Keine Änderungen erkannt.")
+
+csv = anzeige_df.to_csv(index=False).encode("utf-8")
+st.download_button("📂 Exportiere aktuelle Seite als CSV", data=csv, file_name="laufende_liste_export.csv", mime="text/csv")
 
 st.subheader("📋 Daten-Tabelle")
 response = AgGrid(
@@ -130,71 +256,9 @@ response = AgGrid(
     allow_unsafe_jscode=True,
     fit_columns_on_grid_load=True,
     height=800,
-    use_container_width=True
+    use_container_width=True,
+    enable_enterprise_modules=False,
+    enableRowSelection=True
 )
 
-if st.button("📏 Änderungen speichern"):
-    updated_df = pd.DataFrame(response["data"])
-    original_df = st.session_state.get("original_df_page")
-
-    if original_df is None:
-        st.warning("⚠️ Vergleich nicht möglich – Originaldaten fehlen.")
-    else:
-        def normalize(val):
-            if pd.isna(val):
-                return ""
-            if isinstance(val, (pd.Timestamp, date)):
-                return val.strftime("%Y-%m-%d")
-            val = str(val).strip()
-            try:
-                parsed = pd.to_datetime(val, dayfirst=True, errors="coerce")
-                if pd.notna(parsed):
-                    return parsed.strftime("%Y-%m-%d")
-            except:
-                pass
-            return val
-
-        changed_rows = []
-
-        for i, updated_row in updated_df.iterrows():
-            row_id = updated_row["id"]
-            orig_row = original_df[original_df["id"] == row_id]
-            if orig_row.empty:
-                continue
-            orig_row = orig_row.iloc[0]
-
-            row_changed = any(
-                normalize(updated_row[col]) != normalize(orig_row[col])
-                for col in updated_df.columns if col != "id"
-            )
-
-            if row_changed:
-                changed_rows.append(updated_row.to_dict())
-
-        st.write(f"📓 Geänderte Zeilen: {len(changed_rows)}")
-
-        if changed_rows:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            for row in changed_rows:
-                sql = """
-                UPDATE bewegungen SET
-                    belegnummer = ?, artikel_bezeichnung = ?, liste = ?, datum = ?, name = ?, vorname = ?, prirez = ?,
-                    lieferant = ?, ls_nummer = ?, ein_mge = ?, ein_pack = ?, eingang = ?,
-                    aus_mge = ?, aus_pack = ?, ausgang = ?, total = ?, quelle = ?, ks = ?, dirty = ?
-                WHERE id = ?
-                """
-                cursor.execute(sql, (
-                    row["belegnummer"], row["artikel_bezeichnung"], row["liste"], row["datum"], row["name"],
-                    row["vorname"], row["prirez"], row["lieferant"], row["ls_nummer"], row["ein_mge"], row["ein_pack"],
-                    row["eingang"], row["aus_mge"], row["aus_pack"], row["ausgang"], row["total"],
-                    row["quelle"], row["ks"], row["dirty"], row["id"]
-                ))
-            conn.commit()
-            conn.close()
-            st.success(f"✅ {len(changed_rows)} Zeile(n) erfolgreich aktualisiert.")
-        else:
-            st.info("ℹ️ Keine Änderungen erkannt.")
-
-csv = anzeige_df.to_csv(index=False).encode("utf-8")
-st.download_button("📂 Exportiere aktuelle Seite als CSV", data=csv, file_name="laufende_liste_export.csv", mime="text/csv")
+selected_rows = response["selected_rows"]
