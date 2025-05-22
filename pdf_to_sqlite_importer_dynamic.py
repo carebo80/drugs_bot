@@ -48,20 +48,23 @@ def parse_pdf_to_dataframe(pdf_path):
         matches = re.findall(r"Medikament:\s*(.*?)\s*Gesamt:", text, re.DOTALL)
 
         for match in matches:
-            lines = match.strip().splitlines()
-            if len(lines) < 14:
+            match_lines = match.strip().splitlines()
+            if len(match_lines) < 1:
                 continue
 
-            artikelzeile = lines[0].strip()
-            artikel_split = artikelzeile.split(" ", 1)
-            artikelnummer = artikel_split[0] if len(artikel_split) > 1 else ""
-            artikeltext = artikel_split[1] if len(artikel_split) > 1 else ""
+            artikelzeile = match_lines[0].strip()
+            artikelnummer = ""
+            artikeltext = ""
+            artikel_match = re.match(r"(\d+)\s+(.*)", artikelzeile)
+            if artikel_match:
+                artikelnummer = artikel_match.group(1)
+                artikeltext = artikel_match.group(2)
 
-            datenzeilen = lines[12:]
+            lines = match_lines[1:]
             i = 0
-            while i < len(datenzeilen):
-                if i + 1 < len(datenzeilen) and ist_block_start(datenzeilen[i], datenzeilen[i+1]):
-                    block = datenzeilen[i:i+11]
+            while i + 1 < len(lines):
+                if ist_block_start(lines[i], lines[i+1]):
+                    block = lines[i:i+11]
                     is_dirty = False
 
                     if len(block) < 11:
@@ -86,13 +89,11 @@ def parse_pdf_to_dataframe(pdf_path):
                         name = kundenname.strip()
                         final_lieferant = lieferant or None
 
-                    # Zahlen rückwärts suchen
                     zahlen_idx = [j for j in range(len(rest)) if ist_zahl(rest[j])]
                     lager = rest[zahlen_idx[-1]] if len(zahlen_idx) >= 1 else ""
                     bewegung = rest[zahlen_idx[-2]] if len(zahlen_idx) >= 2 else ""
 
-                    # Abstände zählen
-                    aus = ein = ""
+                    ein = aus = ""
                     if len(zahlen_idx) >= 2:
                         abstand = zahlen_idx[-1] - zahlen_idx[-2] - 1
                         if abstand == 0:
