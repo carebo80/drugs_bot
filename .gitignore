@@ -12,6 +12,7 @@ tmp/
 # Excel-/PDF-Dateien
 *.xlsx
 *.pdf
+*.zip
 
 # Upload-Verzeichnis und Backup-Dateien ausschließen
 upload/
