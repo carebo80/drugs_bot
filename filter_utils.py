@@ -1,11 +1,8 @@
-# filter_utils.py
-
 import pandas as pd
 import streamlit as st
+import os
 
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Wendet die gespeicherten Filter in st.session_state auf den DataFrame an."""
-    
     med_filter = st.session_state.get("med_filter", "").strip()
     if med_filter:
         df = df[df["artikel_bezeichnung"].str.contains(med_filter, case=False, na=False)]
@@ -49,3 +46,11 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df = df[pd.to_datetime(df["datum"], errors='coerce') <= pd.to_datetime(datum_bis)]
 
     return df
+
+def lade_lieferantenliste(pfad="data/lieferanten.csv"):
+    if not os.path.exists(pfad):
+        return [""]
+    df = pd.read_csv(pfad)
+    if "lieferant" not in df.columns:
+        return [""]
+    return sorted(df["lieferant"].dropna().unique())

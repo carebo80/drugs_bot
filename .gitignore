@@ -13,6 +13,7 @@ tmp/
 *.xlsx
 *.pdf
 *.zip
+.zipignore
 
 # Upload-Verzeichnis und Backup-Dateien ausschließen
 upload/
