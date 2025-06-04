@@ -14,6 +14,13 @@ DB_PATH = "data/laufende_liste.db"
 if st.session_state.pop("__trigger_refresh__", False):
     st.rerun()
 
+# 🔹 Robust: Nur gültige Datumswerte im ISO-Format parsen
+def format_datum_safe(d):
+    try:
+        return pd.to_datetime(d, format="%Y-%m-%d").strftime("%d.%m.%Y")
+    except Exception:
+        return ""
+
 @st.cache_data
 def lade_daten():
     try:
@@ -23,23 +30,6 @@ def lade_daten():
     except Exception as e:
         st.error(f"❌ Fehler beim Laden der Daten: {e}")
         return pd.DataFrame()
-
-    # Formatierung nur, wenn Spalte vorhanden
-    if "datum" in df.columns:
-        def format_datum_safe(d):
-            try:
-                return pd.to_datetime(d, dayfirst=True).strftime("%d.%m.%Y")
-            except Exception:
-                return ""
-        df["datum"] = df["datum"].apply(format_datum_safe)
-    return df
-
-    # Robust formatieren: Nur gültige Datumswerte umwandeln
-def format_datum_safe(d):
-    try:
-        return pd.to_datetime(d, dayfirst=True).strftime("%d.%m.%Y")
-    except Exception:
-        return ""
 
     if "datum" in df.columns:
         df["datum"] = df["datum"].apply(format_datum_safe)
