@@ -1,7 +1,8 @@
 import streamlit as st
 
 def sicherheitsdialog(label: str, ausfuehren_button: str, aktion):
-    key_base = f"dialog_{label.lower()}"
+    key_base = f"dialog_{label.lower().replace(' ', '_')}"
+    
     if f"{key_base}_offen" not in st.session_state:
         st.session_state[f"{key_base}_offen"] = False
 
@@ -12,8 +13,7 @@ def sicherheitsdialog(label: str, ausfuehren_button: str, aktion):
 
     with st.expander(f"Sicherheitsabfrage: {label}", expanded=True):
         if st.button(ausfuehren_button, key=f"btn_confirm_{key_base}"):
-            aktion()
             st.session_state[f"{key_base}_offen"] = False
-            st.rerun()  # sofort nach Ausführung aktualisieren
-        if st.button("❎ Abbrechen", key=f"btn_cancel_{key_base}"):
+            aktion()
+        elif st.button("❎ Abbrechen", key=f"btn_cancel_{key_base}"):
             st.session_state[f"{key_base}_offen"] = False

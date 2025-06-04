@@ -10,23 +10,46 @@ import os
 
 DB_PATH = "data/laufende_liste.db"
 
+# Trigger-Mechanismus für Refresh
+if st.session_state.pop("__trigger_refresh__", False):
+    st.rerun()
+
 @st.cache_data
 def lade_daten():
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT * FROM bewegungen", conn)
-    conn.close()
-    # Datum ins gewünschte Format
-    df["datum"] = pd.to_datetime(df["datum"], errors="coerce", dayfirst=True).dt.strftime("%d.%m.%Y")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query("SELECT * FROM bewegungen", conn)
+        conn.close()
+    except Exception as e:
+        st.error(f"❌ Fehler beim Laden der Daten: {e}")
+        return pd.DataFrame()
+
+    # Formatierung nur, wenn Spalte vorhanden
+    if "datum" in df.columns:
+        def format_datum_safe(d):
+            try:
+                return pd.to_datetime(d, dayfirst=True).strftime("%d.%m.%Y")
+            except Exception:
+                return ""
+        df["datum"] = df["datum"].apply(format_datum_safe)
+    return df
+
+    # Robust formatieren: Nur gültige Datumswerte umwandeln
+def format_datum_safe(d):
+    try:
+        return pd.to_datetime(d, dayfirst=True).strftime("%d.%m.%Y")
+    except Exception:
+        return ""
+
+    if "datum" in df.columns:
+        df["datum"] = df["datum"].apply(format_datum_safe)
+
     return df
 
 st.set_page_config(page_title="💊 Laufende Liste", layout="wide")
 st.title("💊 Laufende Liste – Übersicht & Bearbeitung")
 
-# ganz oben einfügen
-if st.session_state.pop("__trigger_refresh__", False):
-    st.rerun()
-
-# Sidebar: Buttons und Filter
+# Sidebar
 if st.sidebar.button("🔁 Laufende Liste neu laden"):
     lade_daten.clear()
     st.rerun()
@@ -50,23 +73,21 @@ st.sidebar.selectbox("🧪 Dirty", ["Alle", "Ja", "Nein"], key="dirty_filter")
 st.sidebar.date_input("📆 Von", value=st.session_state.get("datum_von", None), key="datum_von")
 st.sidebar.date_input("📆 Bis", value=st.session_state.get("datum_bis", None), key="datum_bis")
 
-# Filter anwenden
-filtered_df = filter_dataframe(temp_df)
+# Tabelle
+df = filter_dataframe(temp_df)
 
-# Selektion initialisieren
 if "selected_row" not in st.session_state:
     st.session_state["selected_row"] = {}
 
-# Tabelle
 st.subheader("📋 Daten-Tabelle")
-gb = GridOptionsBuilder.from_dataframe(filtered_df)
+gb = GridOptionsBuilder.from_dataframe(df)
 gb.configure_column("id", editable=False)
 gb.configure_default_column(editable=False, resizable=True)
 gb.configure_selection(selection_mode="single", use_checkbox=True)
 grid_options = gb.build()
 
 response = AgGrid(
-    filtered_df,
+    df,
     key="laufende_liste_grid",
     gridOptions=grid_options,
     update_mode=GridUpdateMode.SELECTION_CHANGED,
@@ -77,15 +98,12 @@ response = AgGrid(
     enable_enterprise_modules=False
 )
 
-# Selektion übernehmen
 selected_rows = response.get("selected_rows", [])
 if isinstance(selected_rows, pd.DataFrame):
     selected_rows = selected_rows.to_dict("records")
 
-if isinstance(selected_rows, list) and len(selected_rows) > 0 and "id" in selected_rows[0]:
+if selected_rows and "id" in selected_rows[0]:
     st.session_state["selected_row"] = selected_rows[0]
-else:
-    st.session_state["selected_row"] = {}
 
 selected = st.session_state.get("selected_row", {})
 valid_selection = bool(selected) and "id" in selected
@@ -110,45 +128,42 @@ with col1:
             "aus_pack": None,
             "quelle": "manuell",
             "dirty": True,
-            "new": True  # << Flag wichtig
+            "new": True
         }
         st.session_state["__trigger_refresh__"] = True
 
 with col2:
     def dupliziere():
         row = selected.copy()
-
-        if not row.get("datum"):
+        if not row.get("datum") or not row["datum"].strip():
             st.error("⚠️ Duplizieren nicht möglich: Kein Datum gesetzt.")
             return
 
         try:
-            datum_obj = datetime.strptime(row["datum"], "%d.%m.%Y").date()
-            row["datum"] = datum_obj.isoformat()
+            row["datum"] = datetime.strptime(row["datum"], "%d.%m.%Y").date().isoformat()
         except Exception:
-            st.error("⚠️ Ungültiges Datumsformat beim Duplizieren.")
+            st.error("⚠️ Ungültiges Datum.")
             return
 
-        row["id"] = None
-        row["dirty"] = True
-        row["quelle"] = "manuell"
+        jetzt = pd.Timestamp.now().isoformat()
+        row.update({
+            "id": None,
+            "dirty": True,
+            "quelle": "manuell",
+            "created_at": jetzt,
+            "updated_at": jetzt
+        })
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cols = ", ".join([k for k in row if k != "id"])
+        cols = ", ".join(k for k in row if k != "id")
         placeholders = ", ".join(["?"] * len([k for k in row if k != "id"]))
         sql = f"INSERT INTO bewegungen ({cols}) VALUES ({placeholders})"
         cursor.execute(sql, tuple(row[k] for k in row if k != "id"))
         conn.commit()
         conn.close()
 
-        # Nach Duplizieren selektierten Datensatz auf "neu" setzen
-        st.session_state["selected_row"] = {
-            **row,
-            "new": True
-        }
-
-        lade_daten.clear()
+        st.session_state["selected_row"] = {**row, "new": True}
         st.session_state["__trigger_refresh__"] = True
 
     if valid_selection:
@@ -161,7 +176,6 @@ with col3:
         cursor.execute("DELETE FROM bewegungen WHERE id = ?", (selected["id"],))
         conn.commit()
         conn.close()
-        st.success("🗑️ Zeile gelöscht.")
         lade_daten.clear()
         st.session_state["selected_row"] = {}
         st.session_state["__trigger_refresh__"] = True
@@ -170,15 +184,14 @@ with col3:
         sicherheitsdialog("Löschen", "❌ Ja, löschen", loeschen)
 
 with col4:
-    csv = filtered_df.to_csv(index=False).encode("utf-8")
+    csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("📂 Export als CSV", data=csv, file_name="laufende_liste_export.csv", mime="text/csv")
 
-# Formular
 if selected.get("new", False) or valid_selection:
     st.subheader("✏️ Bearbeitungsformular")
     with st.form("edit_form"):
         updated = {}
-        # (Rest deines Formulars bleibt gleich)
+
         c1a, c1b, c1c, c1d = st.columns([1, 3, 1, 1])
         updated["belegnummer"] = c1a.text_input("Belegnummer", value=selected.get("belegnummer", ""), key="form_beleg")
         updated["artikel_bezeichnung"] = c1b.text_input("Artikel-Bezeichnung", value=selected.get("artikel_bezeichnung", ""), key="form_artikel")
@@ -194,6 +207,8 @@ if selected.get("new", False) or valid_selection:
         c3a, c3b, c3c = st.columns([1, 1, 2])
         updated["name"] = c3a.text_input("Name", value=selected.get("name", ""), key="form_name")
         updated["vorname"] = c3b.text_input("Vorname", value=selected.get("vorname", ""), key="form_vorname")
+
+        # Lieferantenauswahl wie bisher
         lieferanten_df = pd.read_csv("data/lieferanten.csv") if os.path.exists("data/lieferanten.csv") else pd.DataFrame(columns=["lieferant"])
         if "lieferant" not in lieferanten_df.columns:
             lieferanten_df["lieferant"] = ""
@@ -206,47 +221,50 @@ if selected.get("new", False) or valid_selection:
         updated["quelle"] = c4a.selectbox("Quelle", ["excel", "pdf", "manuell"], index=["excel", "pdf", "manuell"].index(selected.get("quelle", "manuell")), key="form_quelle")
         updated["dirty"] = c4b.checkbox("Dirty", value=bool(selected.get("dirty", True)), key="form_dirty")
 
-    if st.form_submit_button("📏 Änderungen speichern"):
-        try:
-            datum_obj = datetime.strptime(updated["datum"], "%d.%m.%Y").date()
-        except ValueError:
-            st.error("⚠️ Bitte gültiges Datum im Format TT.MM.JJJJ eingeben.")
-            st.stop()
+        # Submit-Button
+        if st.form_submit_button("📏 Änderungen speichern"):
+            if not updated["datum"] or not updated["datum"].strip():
+                st.error("⚠️ Bitte ein gültiges Datum eingeben.")
+                st.stop()
 
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        if "id" in selected:
-            sql = """
-                UPDATE bewegungen
-                SET artikel_bezeichnung = ?, belegnummer = ?, liste = ?, datum = ?, 
-                    ein_mge = ?, ein_pack = ?, aus_mge = ?, aus_pack = ?,
-                    name = ?, vorname = ?, lieferant = ?, quelle = ?, dirty = ?
-                WHERE id = ?
-            """
-            values = [
-                updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
-                updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
-                updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
-                selected["id"]
-            ]
-        else:
-            sql = """
-                INSERT INTO bewegungen (artikel_bezeichnung, belegnummer, liste, datum, 
-                    ein_mge, ein_pack, aus_mge, aus_pack,
-                    name, vorname, lieferant, quelle, dirty, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-            jetzt = pd.Timestamp.now().isoformat()
-            values = [
-                updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
-                updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
-                updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
-                jetzt, jetzt
-            ]
-        cursor.execute(sql, values)
-        conn.commit()
-        conn.close()
-        st.success("✅ Eintrag gespeichert.")
-        lade_daten.clear()
-        st.session_state["selected_row"] = {}
-        st.rerun()
+            try:
+                datum_obj = datetime.strptime(updated["datum"], "%d.%m.%Y").date()
+            except ValueError:
+                st.error("⚠️ Bitte gültiges Datum im Format TT.MM.JJJJ eingeben.")
+                st.stop()
+
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+
+            if "id" in selected:
+                sql = """UPDATE bewegungen SET artikel_bezeichnung = ?, belegnummer = ?, liste = ?, datum = ?, 
+                         ein_mge = ?, ein_pack = ?, aus_mge = ?, aus_pack = ?,
+                         name = ?, vorname = ?, lieferant = ?, quelle = ?, dirty = ? WHERE id = ?"""
+                values = [
+                    updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
+                    updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
+                    updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
+                    selected["id"]
+                ]
+            else:
+                sql = """INSERT INTO bewegungen (
+                            artikel_bezeichnung, belegnummer, liste, datum,
+                            ein_mge, ein_pack, aus_mge, aus_pack,
+                            name, vorname, lieferant, quelle, dirty, created_at, updated_at
+                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                jetzt = pd.Timestamp.now().isoformat()
+                values = [
+                    updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
+                    updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
+                    updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
+                    jetzt, jetzt
+                ]
+
+            cursor.execute(sql, values)
+            conn.commit()
+            conn.close()
+
+            st.success("✅ Eintrag gespeichert.")
+            lade_daten.clear()
+            st.session_state["selected_row"] = {}
+            st.session_state["__trigger_refresh__"] = True
