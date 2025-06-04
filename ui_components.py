@@ -1,19 +1,22 @@
 import streamlit as st
 
-def sicherheitsdialog(label: str, ausfuehren_button: str, aktion):
-    key_base = f"dialog_{label.lower().replace(' ', '_')}"
-    
-    if f"{key_base}_offen" not in st.session_state:
-        st.session_state[f"{key_base}_offen"] = False
+def sicherheitsdialog(titel: str, bestaetigungs_button: str, callback):
+    dialog_key = f"sicherheitsdialog_{titel}"
 
-    if not st.session_state[f"{key_base}_offen"]:
-        if st.button(f"⚠️ {label}", key=f"btn_open_{key_base}"):
-            st.session_state[f"{key_base}_offen"] = True
-        return
+    if st.session_state.get(f"{dialog_key}_armed"):
+        # Benutzer hat auf „Ja, bestätigen“ geklickt → ausführen
+        callback()
+        st.session_state[f"{dialog_key}_armed"] = False
+        st.session_state["__trigger_refresh__"] = True
+    else:
+        # Erste Stufe: Sicherheitsfrage anzeigen
+        if st.button(f"⚠️ {titel} bestätigen", key=f"{dialog_key}_start"):
+            st.session_state[f"{dialog_key}_armed"] = True
 
-    with st.expander(f"Sicherheitsabfrage: {label}", expanded=True):
-        if st.button(ausfuehren_button, key=f"btn_confirm_{key_base}"):
-            st.session_state[f"{key_base}_offen"] = False
-            aktion()
-        elif st.button("❎ Abbrechen", key=f"btn_cancel_{key_base}"):
-            st.session_state[f"{key_base}_offen"] = False
+        if st.session_state.get(f"{dialog_key}_armed"):
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.warning(f"Willst du wirklich **{titel}**?")
+            with col2:
+                if st.button(bestaetigungs_button, key=f"{dialog_key}_confirm"):
+                    pass  # Button dient nur als Trigger, nächste Iteration führt Callback aus

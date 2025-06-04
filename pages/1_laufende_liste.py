@@ -120,8 +120,9 @@ with col1:
             "dirty": True,
             "new": True
         }
-        st.session_state["__trigger_refresh__"] = True
-
+        st.session_state["__trigger_new_form__"] = True
+        st.rerun()  # ⬅️ wichtig!
+   
 with col2:
     def dupliziere():
         row = selected.copy()
@@ -241,7 +242,7 @@ if selected.get("new", False) or valid_selection:
                             artikel_bezeichnung, belegnummer, liste, datum,
                             ein_mge, ein_pack, aus_mge, aus_pack,
                             name, vorname, lieferant, quelle, dirty, created_at, updated_at
-                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
                 jetzt = pd.Timestamp.now().isoformat()
                 values = [
                     updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
@@ -250,11 +251,12 @@ if selected.get("new", False) or valid_selection:
                     jetzt, jetzt
                 ]
 
-            cursor.execute(sql, values)
-            conn.commit()
-            conn.close()
+                cursor.execute(sql, values)
+                conn.commit()
+                conn.close()
 
-            st.success("✅ Eintrag gespeichert.")
-            lade_daten.clear()
-            st.session_state["selected_row"] = {}
-            st.session_state["__trigger_refresh__"] = True
+                st.success("✅ Neuer Eintrag gespeichert.")
+                st.session_state["selected_row"] = {}
+                st.session_state["__trigger_refresh__"] = True
+                st.stop()  # ⬅️ verhindert doppeltes Formular nach Speichern!
+
