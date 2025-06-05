@@ -16,10 +16,14 @@ if st.session_state.pop("__trigger_refresh__", False):
 
 # 🔹 Robust: Nur gültige Datumswerte im ISO-Format parsen
 def format_datum_safe(d):
-    try:
-        return pd.to_datetime(d, format="%Y-%m-%d").strftime("%d.%m.%Y")
-    except Exception:
+    if pd.isna(d) or not isinstance(d, str):
         return ""
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(d, fmt).strftime("%d.%m.%Y")
+        except:
+            continue
+    return ""
 
 @st.cache_data
 def lade_daten():
