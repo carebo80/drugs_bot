@@ -2,7 +2,7 @@
 Ein Streamlit-basiertes Tool zur Verwaltung und Analyse von Medikamentenbewegungen aus PDF-Importen.
 
 ## Features
-- PDF-Upload & automatischer Import in SQLite
+- PDF-Upload, Layoutanylse & automatischer Import in SQLite
 - Manuelle Bearbeitung in interaktiver Tabelle
 - CSV-Export, Duplizieren, Löschen
 - Automatische Listenklassifizierung (A/B)
