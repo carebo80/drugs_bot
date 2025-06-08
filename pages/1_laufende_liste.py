@@ -203,14 +203,28 @@ if selected.get("new", False) or valid_selection:
         updated["name"] = c3a.text_input("Name", value=selected.get("name", ""), key="form_name")
         updated["vorname"] = c3b.text_input("Vorname", value=selected.get("vorname", ""), key="form_vorname")
 
-        # Lieferantenauswahl wie bisher
-        lieferanten_df = pd.read_csv("data/lieferanten.csv") if os.path.exists("data/lieferanten.csv") else pd.DataFrame(columns=["lieferant"])
-        if "lieferant" not in lieferanten_df.columns:
-            lieferanten_df["lieferant"] = ""
+        lieferanten_path = "data/lieferanten.csv"
+
+        if os.path.exists(lieferanten_path):
+            try:
+                lieferanten_df = pd.read_csv(lieferanten_path, header=None)
+                # Wenn erste Zeile vermutlich ein Header ist, manuell korrigieren
+                if "lieferant" not in lieferanten_df.iloc[0].values:
+                    lieferanten_df.columns = ["lieferant"]
+                else:
+                    # Datei hat bereits einen Header, neu laden mit header=0
+                    lieferanten_df = pd.read_csv(lieferanten_path)
+            except Exception as e:
+                st.warning(f"⚠️ Fehler beim Laden der Lieferantenliste: {e}")
+                lieferanten_df = pd.DataFrame(columns=["lieferant"])
+        else:
+            lieferanten_df = pd.DataFrame(columns=["lieferant"])
+
         lieferanten_liste = [""] + sorted(lieferanten_df["lieferant"].dropna().unique()) if not lieferanten_df.empty else [""]
         aktuell = selected.get("lieferant", "")
         index = lieferanten_liste.index(aktuell) if aktuell in lieferanten_liste else 0
         updated["lieferant"] = c3c.selectbox("Lieferant", lieferanten_liste, index=index, key="form_lieferant")
+
 
         c4a, c4b = st.columns([2, 1])
         updated["quelle"] = c4a.selectbox("Quelle", ["excel", "pdf", "manuell"], index=["excel", "pdf", "manuell"].index(selected.get("quelle", "manuell")), key="form_quelle")
