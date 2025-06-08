@@ -1,4 +1,4 @@
-# 💊 drugs_bot
+# 💊 Drugs Bot
 Ein Streamlit-basiertes Tool zur Verwaltung und Analyse von Medikamentenbewegungen aus PDF-Importen.
 
 ## Features
