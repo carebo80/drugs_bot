@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import pandas as pd
 from datetime import datetime
+import streamlit as st
 
 LOG_PATH = "tmp/import.log"
 LIEFERANTEN_CSV = "data/lieferanten.csv"
@@ -30,108 +31,64 @@ def ist_zahl(text):
 def ist_block_start(zeile1, zeile2):
     return re.fullmatch(r"\d{5}", zeile1.strip()) and re.match(r"\d{2}\.\d{2}\.\d{4}", zeile2.strip())
 
-def parse_pdf_to_dataframe(pdf_path):
-    if not os.path.isfile(pdf_path):
-        log(f"PDF nicht gefunden: {pdf_path}")
-        return pd.DataFrame()
-
-    lieferanten_set = lade_liste(LIEFERANTEN_CSV)
-    whitelist_set = lade_liste(WHITELIST_CSV)
+def parse_pdf_to_dataframe(pdf_path: str) -> pd.DataFrame:
 
     doc = fitz.open(pdf_path)
-    records = []
-    seiten_gesamt = len(doc)
+    all_data = []
 
-    for page_num in range(seiten_gesamt):
-        page = doc.load_page(page_num)
-        text = page.get_text()
-        matches = re.findall(r"Medikament:\s*(.*?)\s*Gesamt:", text, re.DOTALL)
+    for page in doc:
+        blocks = page.get_text("blocks")
+        blocks.sort(key=lambda b: (b[1], b[0]))  # Sortieren: y (vertikal), dann x (horizontal)
 
-        for match in matches:
-            match_lines = match.strip().splitlines()
-            if len(match_lines) < 1:
-                continue
+        lines = []
+        current_line_y = None
+        current_line = []
 
-            artikelzeile = match_lines[0].strip()
-            artikelnummer = ""
-            artikeltext = ""
-            artikel_match = re.match(r"(\d+)\s+(.*)", artikelzeile)
-            if artikel_match:
-                artikelnummer = artikel_match.group(1)
-                artikeltext = artikel_match.group(2)
+        for block in blocks:
+            x0, y0, x1, y1, text, *_ = block
+            if current_line_y is None or abs(y0 - current_line_y) > 5:
+                if current_line:
+                    lines.append(current_line)
+                current_line = [text.strip()]
+                current_line_y = y0
+            else:
+                current_line.append(text.strip())
 
-            lines = match_lines[1:]
-            i = 0
-            while i + 1 < len(lines):
-                if ist_block_start(lines[i], lines[i+1]):
-                    block = lines[i:i+11]
-                    is_dirty = False
+        if current_line:
+            lines.append(current_line)
 
-                    if len(block) < 11:
-                        block += [""] * (11 - len(block))
-                        is_dirty = True
+        # Datenblöcke filtern (mindestens 10 Spalten = potenzielles Datenfeld)
+        for line in lines:
+            if len(line) >= 10:
+                rest = line[-4:]
+                core = line[:-4]
 
-                    block = [line.strip() for line in block]
-                    lfdnr, datum, kunde_id, kundenname = block[:4]
-                    arzt_id, arzt_name, lieferant = block[4:7]
-                    rest = block[7:]
+                # BG-Layout wird anhand der Restelemente (immer 4) bestätigt
+                bg_rez_nr = rest[-1].strip() if rest[-1].strip() else None
+                lager = rest[-2].strip() if rest[-2].strip() else None
+                bewegung = rest[-3].strip() if rest[-3].strip() else None
+                steuerfeld = rest[-4].strip()
 
-                    name_upper = kundenname.upper()
-                    lieferant_upper = lieferant.upper()
+                # Bewegung je nach Position:
+                ein = bewegung if steuerfeld == "" else None
+                aus = bewegung if steuerfeld != "" else None
 
-                    if any(w in name_upper for w in whitelist_set):
-                        name = kundenname.strip()
-                        final_lieferant = lieferant
-                    elif name_upper in lieferanten_set or lieferant_upper in lieferanten_set:
-                        name = ""
-                        final_lieferant = kundenname or lieferant
-                    else:
-                        name = kundenname.strip()
-                        final_lieferant = lieferant or None
+                data = {
+                    "lfdnr": core[0] if len(core) > 0 else None,
+                    "datum": core[1] if len(core) > 1 else None,
+                    "kunde_name": core[2] if len(core) > 2 else None,
+                    "arzt_name": core[3] if len(core) > 3 else None,
+                    "lieferant": core[4] if len(core) > 4 else None,
+                    "ein": ein,
+                    "aus": aus,
+                    "lager": lager,
+                    "bg_rez_nr": bg_rez_nr,
+                    "liste": "a",  # Da das ganze PDF A ist
+                }
 
-                    zahlen_idx = [j for j in range(len(rest)) if ist_zahl(rest[j])]
-                    lager = rest[zahlen_idx[-1]] if len(zahlen_idx) >= 1 else ""
-                    bewegung = rest[zahlen_idx[-2]] if len(zahlen_idx) >= 2 else ""
+                all_data.append(data)
 
-                    ein = aus = ""
-                    if len(zahlen_idx) >= 2:
-                        abstand = zahlen_idx[-1] - zahlen_idx[-2] - 1
-                        if abstand == 0:
-                            aus = bewegung
-                        elif abstand == 1:
-                            ein = bewegung
-                        else:
-                            is_dirty = True
-                    else:
-                        is_dirty = True
-
-                    if not lfdnr.strip() or not datum.strip() or not re.match(r"\d{2}\.\d{2}\.\d{4}", datum):
-                        is_dirty = True
-
-                    records.append({
-                        "dirty": is_dirty,
-                        "lfdnr": lfdnr,
-                        "datum": datum,
-                        "kunde_id": kunde_id,
-                        "vorname": "",
-                        "nachname": name,
-                        "arzt_id": arzt_id,
-                        "arzt_name": arzt_name,
-                        "lieferant": final_lieferant,
-                        "ein": ein,
-                        "aus": aus,
-                        "lager": lager,
-                        "abh": "",
-                        "artikelnummer": artikelnummer,
-                        "artikeltext": artikeltext
-                    })
-                    i += 11
-                else:
-                    i += 1
-
-    df = pd.DataFrame(records).fillna('').astype({'dirty': 'bool'})
-    log(f"Seiten gelesen: {seiten_gesamt}, Bewegungen erkannt: {len(records)}")
-    log(f"Davon dirty: {df['dirty'].sum()}, clean: {len(df) - df['dirty'].sum()}")
+    df = pd.DataFrame(all_data)
     return df
 
 def import_dataframe_to_sqlite(df, db_path):
@@ -146,8 +103,8 @@ def import_dataframe_to_sqlite(df, db_path):
             aus_mge, aus_pack, ausgang,
             name, vorname,
             lieferant, quelle,
-            created_at, updated_at, dirty, ks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            created_at, updated_at, dirty, ks, bg_rez_nr
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
 
         ein_raw = str(row["ein"]).strip()
@@ -156,12 +113,12 @@ def import_dataframe_to_sqlite(df, db_path):
         aus_mge = int(aus_raw) if ist_zahl(aus_raw) else None
 
         daten = (
-            row.get("artikelnummer"), row.get("artikeltext"), "b", row.get("datum"),
+            row.get("artikelnummer"), row.get("artikeltext"), "a" if row.get("bg_rez_nr") else "b", row.get("datum"),
             ein_mge, None, None,
             aus_mge, None, None,
             row.get("nachname"), row.get("vorname"),
             row.get("lieferant"), "pdf",
-            datetime.now().isoformat(), datetime.now().isoformat(), row.get("dirty"), None
+            datetime.now().isoformat(), datetime.now().isoformat(), row.get("dirty"), None, row.get("bg_rez_nr")
         )
 
         cursor.execute(insert_sql, daten)
@@ -172,8 +129,10 @@ def import_dataframe_to_sqlite(df, db_path):
 
 def run_import(pdf_path, db_path="data/laufende_liste.db"):
     df = parse_pdf_to_dataframe(pdf_path)
-    if not df.empty and "artikeltext" in df.columns:
-        df = df[df["artikeltext"].notnull() & (df["artikeltext"].str.strip() != "")]
+    st.write("✅ Bewegungen gefunden:", len(df))
+    st.dataframe(df)
+
+    if not df.empty:
         import_dataframe_to_sqlite(df, db_path)
         try:
             timestamp = datetime.now().strftime("_%Y%m%d-%H%M%S")
@@ -185,3 +144,4 @@ def run_import(pdf_path, db_path="data/laufende_liste.db"):
             log(f"⚠️ Fehler beim Löschen/Sichern der Datei {pdf_path}: {e}")
     else:
         log("Keine gültigen Bewegungen gefunden – kein Import durchgeführt.")
+
