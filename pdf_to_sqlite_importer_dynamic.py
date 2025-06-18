@@ -24,21 +24,62 @@ def lade_liste(pfad):
     except Exception as e:
         log(f"⚠️ Fehler beim Laden von {pfad}: {e}")
         return set()
+lieferanten_set = lade_liste(LIEFERANTEN_CSV)
 
 def ist_zahl(text):
     return bool(re.fullmatch(r"-?\d+([.,]\d+)?", text.strip()))
 
 def ist_block_start(zeile1, zeile2):
     return re.fullmatch(r"\d{5}", zeile1.strip()) and re.match(r"\d{2}\.\d{2}\.\d{4}", zeile2.strip())
+def erkenne_bewegung(rest):
+    if len(rest) != 4:
+        return None, None, None, None
+
+    val1, val2, val3, val4 = [s.strip() for s in rest]
+
+    bg_rez_nr = val4 if val4 else None
+    lager = int(val3) if val3.lstrip("-").isdigit() else None
+
+    ein = aus = None
+
+    if val1 == "" and val2.lstrip("-").isdigit():
+        aus = int(val2)
+    elif val2 == "" and val1.lstrip("-").isdigit():
+        ein = int(val1)
+    elif val1.lstrip("-").isdigit() and val2 == "":
+        ein = int(val1)
+    elif val2.lstrip("-").isdigit() and val1 == "":
+        aus = int(val2)
+    elif val1.lstrip("-").isdigit() and val2.lstrip("-").isdigit():
+        # Beide befüllt → nicht eindeutig → ignorieren
+        return None, None, lager, bg_rez_nr
+
+    return ein, aus, lager, bg_rez_nr
+
+def is_valid_lfdnr(s):
+    return s.isdigit() and len(s) >= 5
+
+def is_valid_datum(s):
+    return re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", s.strip()) is not None
+
+def is_valid_lfdnr(s):
+    return s.isdigit() and len(s) >= 5
+
+def is_valid_datum(s):
+    return re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", s.strip()) is not None
 
 def parse_pdf_to_dataframe(pdf_path: str) -> pd.DataFrame:
-
     doc = fitz.open(pdf_path)
     all_data = []
+    artikelnummer = None
+    artikeltext = None
+
+    lieferanten_set = lade_liste(LIEFERANTEN_CSV)
+    whitelist_set = lade_liste(WHITELIST_CSV)
 
     for page in doc:
         blocks = page.get_text("blocks")
-        blocks.sort(key=lambda b: (b[1], b[0]))  # Sortieren: y (vertikal), dann x (horizontal)
+        blocks.sort(key=lambda b: (b[1], b[0]))  # sort by y, then x
 
         lines = []
         current_line_y = None
@@ -57,39 +98,77 @@ def parse_pdf_to_dataframe(pdf_path: str) -> pd.DataFrame:
         if current_line:
             lines.append(current_line)
 
-        # Datenblöcke filtern (mindestens 10 Spalten = potenzielles Datenfeld)
         for line in lines:
-            if len(line) >= 10:
-                rest = line[-4:]
-                core = line[:-4]
+            flat = " ".join(line).replace("\n", " ").strip().split()
+            if not flat:
+                continue
 
-                # BG-Layout wird anhand der Restelemente (immer 4) bestätigt
-                bg_rez_nr = rest[-1].strip() if rest[-1].strip() else None
-                lager = rest[-2].strip() if rest[-2].strip() else None
-                bewegung = rest[-3].strip() if rest[-3].strip() else None
-                steuerfeld = rest[-4].strip()
+            # Medikamentenzeile erkennen
+            if flat[0].upper() == "MEDIKAMENT:" and len(flat) >= 3:
+                artikelnummer = flat[1]
+                artikeltext = " ".join(flat[2:])
+                continue
 
-                # Bewegung je nach Position:
-                ein = bewegung if steuerfeld == "" else None
-                aus = bewegung if steuerfeld != "" else None
+            # Überschrift ignorieren
+            if flat[0].lower() == "lfdnr":
+                continue
+
+            # Bewegungszeile
+            if len(flat) >= 8 and is_valid_lfdnr(flat[0]) and is_valid_datum(flat[1]):
+                core = flat[:-4]
+                rest = flat[-4:]
+
+                # Aufteilen
+                lfdnr = core[0]
+                datum = core[1]
+                kunde_name = core[2] if len(core) > 2 else ""
+                arzt_name = core[3] if len(core) > 3 else ""
+                lieferant = core[4] if len(core) > 4 else ""
+
+                # Verschobene Felder erkennen (Lieferant steht im Kundenfeld)
+                if kunde_name.upper() in lieferanten_set:
+                    lieferant = kunde_name
+                    kunde_name = ""
+                    arzt_name = ""
+                    print(f"[⚠️ SHIFT] Verschoben erkannt: {lieferant}")
+
+                ein, aus, lager, bg_rez_nr = erkenne_bewegung(rest)
+
+                # Nur ein oder aus erlaubt
+                if ein is not None and aus is not None:
+                    print(f"[⛔ FEHLER] doppelt belegt: ein={ein}, aus={aus} → verworfen")
+                    continue
+
+                # Wenn Lieferant aus CSV → immer ein
+                if lieferant.upper() in lieferanten_set:
+                    if ein is None and aus is not None:
+                        ein = aus
+                        aus = None
+                    elif ein is None and aus is None:
+                        ein = 0
+                    aus = None
+                    print(f"[✔ EIN] Lieferant erkannt: {lieferant} → ein={ein}")
 
                 data = {
-                    "lfdnr": core[0] if len(core) > 0 else None,
-                    "datum": core[1] if len(core) > 1 else None,
-                    "kunde_name": core[2] if len(core) > 2 else None,
-                    "arzt_name": core[3] if len(core) > 3 else None,
-                    "lieferant": core[4] if len(core) > 4 else None,
+                    "lfdnr": lfdnr,
+                    "datum": datum,
+                    "kunde_name": kunde_name,
+                    "arzt_name": arzt_name,
+                    "lieferant": lieferant,
                     "ein": ein,
                     "aus": aus,
                     "lager": lager,
                     "bg_rez_nr": bg_rez_nr,
-                    "liste": "a",  # Da das ganze PDF A ist
+                    "liste": "a",  # fix auf Layout A
+                    "artikelnummer": artikelnummer,
+                    "artikeltext": artikeltext
                 }
 
+                print(f"[✔ PARSED] {data}")
                 all_data.append(data)
 
-    df = pd.DataFrame(all_data)
-    return df
+    return pd.DataFrame(all_data)
+
 
 def import_dataframe_to_sqlite(df, db_path):
     conn = sqlite3.connect(db_path)
