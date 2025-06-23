@@ -31,3 +31,23 @@ def analyze_pdf_blocks(pdf_path):
 if __name__ == "__main__":
     # Pfad zum PDF hier anpassen
     analyze_pdf_blocks("upload/CPrintQPrinterObject-30824-0.pdf")
+def extract_table_rows(pdf_path):
+    import fitz
+    import re
+
+    doc = fitz.open(pdf_path)
+    rows = []
+
+    for page in doc:
+        text = page.get_text()
+        matches = re.findall(r"Medikament:\s*(.*?)\s*Gesamt:", text, re.DOTALL)
+
+        for match in matches:
+            lines = match.strip().splitlines()[1:]  # Erste Zeile: Artikeltext
+            for line in lines:
+                # Zeile muss mit Lfdnr (mind. 5 Ziffern) + Datum beginnen
+                tokens = line.strip().split()
+                if len(tokens) >= 5 and re.fullmatch(r"\d{5}", tokens[0]) and re.match(r"\d{2}\.\d{2}\.\d{4}", tokens[1]):
+                    rows.append(tokens)
+
+    return rows
