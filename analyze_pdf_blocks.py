@@ -39,15 +39,27 @@ def extract_table_rows(pdf_path):
     rows = []
 
     for page in doc:
-        text = page.get_text()
-        matches = re.findall(r"Medikament:\s*(.*?)\s*Gesamt:", text, re.DOTALL)
+        lines = page.get_text().splitlines()
+        cleaned = [line.strip() for line in lines if line.strip() != ""]
 
-        for match in matches:
-            lines = match.strip().splitlines()[1:]  # Erste Zeile: Artikeltext
-            for line in lines:
-                # Zeile muss mit Lfdnr (mind. 5 Ziffern) + Datum beginnen
-                tokens = line.strip().split()
-                if len(tokens) >= 5 and re.fullmatch(r"\d{5}", tokens[0]) and re.match(r"\d{2}\.\d{2}\.\d{4}", tokens[1]):
-                    rows.append(tokens)
+        buffer = []
+        for item in cleaned:
+            # Blockstart: 5-stellige Nummer + gültiges Datum folgt
+            if len(buffer) == 0 and re.fullmatch(r"\d{5}", item):
+                buffer.append(item)
+            elif len(buffer) == 1 and re.match(r"\d{2}\.\d{2}\.\d{4}", item):
+                buffer.append(item)
+            elif len(buffer) >= 2:
+                buffer.append(item)
+
+            # Sobald wir 11 oder 12 Elemente haben (Layout B oder A), block beenden
+            if len(buffer) == 12:
+                rows.append(buffer.copy())
+                buffer.clear()
+            elif len(buffer) == 11:
+                rows.append(buffer.copy())
+                buffer.clear()
+            elif len(buffer) > 12:
+                buffer.clear()  # Ungültiger Block
 
     return rows
