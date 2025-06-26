@@ -1,8 +1,11 @@
 import streamlit as st
 import os
-from analyze_pdf_blocks import extract_table_rows  # PDF-Zeilen extrahieren
-from pdf_to_sqlite_importer_dynamic import parse_pdf_to_dataframe_dynamic_layout, run_import  # Parser + Import
 import traceback
+from pdf_to_sqlite_importer_dynamic import (
+    extract_table_rows_with_article,
+    parse_pdf_to_dataframe_dynamic_layout,
+    run_import
+)
 
 st.set_page_config(page_title="📄 PDF-Import", layout="centered")
 st.title("📄 PDF Upload & Datenbank-Import")
@@ -24,11 +27,11 @@ if uploaded_file is not None:
 
     with st.spinner("📦 Import läuft..."):
         try:
-            # 🔍 PDF analysieren → Zeilen extrahieren
-            raw_rows = extract_table_rows(save_path)
+            # 🔍 PDF analysieren → Zeilen extrahieren mit Artikel-Metadaten
+            raw_rows = extract_table_rows_with_article(save_path)
             st.info(f"📄 {len(raw_rows)} Zeilen extrahiert.")
 
-            # 🧠 Zeilen parsen
+            # 🧠 Zeilen parsen inkl. Artikelinfo (Bezeichnung, Packungsgröße etc.)
             parsed_df = parse_pdf_to_dataframe_dynamic_layout(raw_rows)
 
             # 💾 In DB schreiben

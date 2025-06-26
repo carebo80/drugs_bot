@@ -1,13 +1,12 @@
 import pandas as pd
 import sqlite3
-import os
 import re
-from pathlib import Path
 import fitz  # PyMuPDF
+from pathlib import Path
 
 LIEFERANTEN_PATH = "data/lieferanten.csv"
+WHITELIST_PATH = "data/whitelist.csv"
 DB_PATH = "data/laufende_liste.db"
-
 
 def safe_int(value):
     try:
@@ -15,78 +14,28 @@ def safe_int(value):
     except:
         return 0
 
+def normalize(text):
+    return re.sub(r"[^a-z]", "", text.lower())
 
 def extract_article_info(text):
-    match = re.search(r"(\d{4,})\s+(.*?)(\d+)\s*STK", text)
+    match = re.search(r"Medikament:\s*(.*?)\s+(\d+)\s*STK", text)
     if match:
-        belegnummer = match.group(1)
-        artikel_bezeichnung = match.group(2).strip()
-        packungsgroesse = safe_int(match.group(3))
-        return belegnummer, artikel_bezeichnung, packungsgroesse
-    return None, None, 0
-
-
-def parse_row(row, lieferanten_set, artikel_info):
-    layout = 'a' if len(row) == 12 else 'b' if len(row) == 11 else None
-    if layout is None:
-        return None
-
-    try:
-        lfdnr = row[0] if row[0].isdigit() and len(row[0]) >= 5 else None
-        datum = row[1]
-        if layout == 'a':
-            bewegung_1 = row[7]
-            bewegung_2 = row[8]
-            bg_rez_nr = row[9].strip() if row[9].strip() else None
-            lieferant_kandidat = row[6].strip()
-            name_raw = row[3:6]
-        else:
-            bewegung_1 = row[6]
-            bewegung_2 = row[7]
-            bg_rez_nr = None
-            lieferant_kandidat = row[5].strip()
-            name_raw = row[3:5]
-
-        name = " ".join(name_raw).strip()
-        lieferant = ""
-        for l in lieferanten_set:
-            if l.lower() in lieferant_kandidat.lower():
-                lieferant = l
-                name = ""
-                break
-
-        b1 = safe_int(bewegung_1)
-        b2 = safe_int(bewegung_2)
-        ein_mge = aus_mge = 0
-        if lieferant:
-            ein_mge = b1
-        else:
-            if b1 > 0 and b2 == 0:
-                ein_mge = b1
-            elif b2 > 0 and b1 == 0:
-                aus_mge = b2
-            else:
-                return None
-
-        # Artikelinfo zuweisen
-        belegnummer, artikel_bezeichnung, packungsgroesse = artikel_info
-
+        artikel_text = match.group(1).strip()
+        packung = int(match.group(2))
+        beleg_match = re.search(r"\b(\d{5,})\b", artikel_text)
+        belegnummer = beleg_match.group(1) if beleg_match else None
+        # Entferne belegnummer aus artikelbezeichnung
+        artikel_text = re.sub(rf"\b{belegnummer}\b", "", artikel_text).strip() if belegnummer else artikel_text
         return {
-            "datum": datum,
-            "name": name,
-            "lieferant": lieferant,
-            "ein_mge": ein_mge,
-            "aus_mge": aus_mge,
-            "bg_rez_nr": bg_rez_nr,
-            "layout": layout,
+            "artikel_bezeichnung": artikel_text,
             "belegnummer": belegnummer,
-            "artikel_bezeichnung": artikel_bezeichnung,
-            "packungsgroesse": packungsgroesse
+            "packungsgroesse": packung
         }
-
-    except Exception:
-        return None
-
+    return {
+        "artikel_bezeichnung": "Unbekannt",
+        "belegnummer": None,
+        "packungsgroesse": 1
+    }
 
 def extract_table_rows_with_article(pdf_path):
     doc = fitz.open(pdf_path)
@@ -94,44 +43,131 @@ def extract_table_rows_with_article(pdf_path):
 
     for page in doc:
         text = page.get_text()
-        article_info = extract_article_info(text)
-        matches = re.findall(r"Medikament:\s*(.*?)\s*Gesamt:", text, re.DOTALL)
-        for match in matches:
-            lines = match.strip().splitlines()
-            for line in lines[1:]:  # erste Zeile = Kopfzeile mit Artikelinfo
-                tokens = line.strip().split()
-                if len(tokens) >= 5 and re.fullmatch(r"\d{5}", tokens[0]) and re.match(r"\d{2}\.\d{2}\.\d{4}", tokens[1]):
-                    all_rows.append((tokens, article_info))
+        meta = extract_article_info(text)
+        lines = text.splitlines()
+
+        i = 0
+        while i + 1 < len(lines):
+            zeile1, zeile2 = lines[i].strip(), lines[i+1].strip()
+            if re.fullmatch(r"\d{5}", zeile1) and re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", zeile2):
+                block = lines[i:i+12]
+                tokens = []
+                for line in block:
+                    tokens.extend(line.strip().split())
+                if 9 <= len(tokens) <= 13:
+                    all_rows.append((tokens, meta))
+                i += 12
+            else:
+                i += 1
 
     return all_rows
 
+def parse_row(row, meta, lieferanten_set, whitelist_set):
+    layout = 'a' if len(row) == 12 else 'b' if len(row) == 11 else None
+    if layout is None:
+        return None
+    try:
+        datum = row[1]
+        if layout == 'a':
+            bewegung_1 = row[-4]
+            bewegung_2 = row[-3]
+            bg_rez_nr = row[-2].strip() if row[-2].strip() else None
+            name_raw = row[3:-4]
+        else:
+            bewegung_1 = row[-3]
+            bewegung_2 = row[-2]
+            bg_rez_nr = None
+            name_raw = row[3:-3]
 
-def parse_pdf_to_dataframe_dynamic_layout(pdf_path):
+        name_str = " ".join(name_raw).strip()
+        name_norm = normalize(name_str)
+
+        lieferant = ""
+        name = name_str
+
+        # Prüfe, ob es sich um eine reine Lieferantenzeile handelt (nur 1 Wort wie "VOIGT")
+        if normalize(row[3]) in lieferanten_set:
+            lieferant = row[3]
+            name = ""
+        else:
+            for l in lieferanten_set:
+                if l in name_norm:
+                    lieferant = l
+                    name = ""
+                    break
+
+        if not lieferant:
+            for wl in whitelist_set:
+                if wl in name_norm:
+                    break
+            else:
+                name = re.split(r"\sK\d{6,}|\s[A-Z]\d{6,}", name_str)[0].strip()
+
+        b1 = safe_int(bewegung_1)
+        b2 = safe_int(bewegung_2)
+        ein_mge = aus_mge = ein_pack = aus_pack = 0
+        dirty = False
+
+        if lieferant:
+            ein_mge = b1
+            ein_pack = meta["packungsgroesse"] or 1
+        elif b1 > 0 and b2 <= 0:
+            ein_mge = b1
+            ein_pack = meta["packungsgroesse"] or 1
+        elif b2 > 0 and b1 <= 0:
+            aus_mge = b2
+            aus_pack = meta["packungsgroesse"] or 1
+        else:
+            dirty = True
+
+        artikel_bezeichnung = meta["artikel_bezeichnung"] or "Unbekannt"
+
+        return {
+            "datum": datum,
+            "name": name,
+            "lieferant": lieferant,
+            "ein_mge": ein_mge,
+            "aus_mge": aus_mge,
+            "ein_pack": ein_pack,
+            "aus_pack": aus_pack,
+            "bg_rez_nr": bg_rez_nr,
+            "liste": layout,
+            "belegnummer": meta["belegnummer"],
+            "artikel_bezeichnung": artikel_bezeichnung,
+            "dirty": bool(dirty),
+            "quelle": "pdf"
+        }
+    except Exception:
+        return None
+
+def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
     if not Path(LIEFERANTEN_PATH).exists():
         raise FileNotFoundError("Lieferantenliste nicht gefunden")
-
     lieferanten_df = pd.read_csv(LIEFERANTEN_PATH)
-    lieferanten_set = set(lieferanten_df.iloc[:, 0].astype(str).str.strip())
+    lieferanten_set = set(normalize(l) for l in lieferanten_df.iloc[:, 0])
 
-    rows = extract_table_rows_with_article(pdf_path)
-    parsed_rows = []
-    for row, artikel_info in rows:
-        parsed = parse_row(row, lieferanten_set, artikel_info)
+    if not Path(WHITELIST_PATH).exists():
+        whitelist_set = set()
+    else:
+        whitelist_df = pd.read_csv(WHITELIST_PATH)
+        whitelist_set = set(normalize(w) for w in whitelist_df.iloc[:, 0])
+
+    result_rows = []
+    for tokens, meta in rows_with_meta:
+        parsed = parse_row(tokens, meta, lieferanten_set, whitelist_set)
         if parsed:
-            parsed_rows.append(parsed)
+            result_rows.append(parsed)
 
-    return pd.DataFrame(parsed_rows)
+    return pd.DataFrame(result_rows)
 
-
-def run_import(df):
-    if not isinstance(df, pd.DataFrame):
-        print("❌ Kein gültiger DataFrame")
+def run_import(parsed_df):
+    if not isinstance(parsed_df, pd.DataFrame):
+        print("❌ Fehler: Übergabe ist kein DataFrame")
         return
-
-    if df.empty:
+    if parsed_df.empty:
         print("⚠️ Keine gültigen Zeilen zum Import.")
         return
 
     with sqlite3.connect(DB_PATH) as conn:
-        df.to_sql("bewegungen", conn, if_exists="append", index=False)
-    print(f"✅ {len(df)} Zeilen erfolgreich importiert.")
+        parsed_df.to_sql("bewegungen", conn, if_exists="append", index=False)
+    print(f"✅ {len(parsed_df)} Zeilen erfolgreich importiert.")
