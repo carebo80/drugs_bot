@@ -1,78 +1,75 @@
+import fitz
 import pandas as pd
-import sqlite3
 import re
-import fitz  # PyMuPDF
-from pathlib import Path
-from datetime import datetime
-from collections import defaultdict
 import difflib
+import sqlite3
+from pathlib import Path
 
+# 🔧 Konfigurierbare Pfade
 LIEFERANTEN_PATH = "data/lieferanten.csv"
 WHITELIST_PATH = "data/whitelist.csv"
 DB_PATH = "data/laufende_liste.db"
 LOG_PATH = "tmp/import.log"
 
+def normalize(text):
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
 def safe_int(value):
     try:
-        return int(str(value).strip())
-    except:
+        return int(value)
+    except (ValueError, TypeError):
         return 0
 
-def normalize(text):
-    return re.sub(r"[^a-z]", "", text.lower())
-
-def log_import(message):
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        f.write(f"[{timestamp}] {message}\n")
-
-def group_blocks_by_line(blocks, y_tolerance=2.0):
-    lines = defaultdict(list)
-    for x0, y0, x1, y1, text, *_ in blocks:
-        y_key = round(y0 / y_tolerance)
-        lines[y_key].append((x0, text))
-    return [
-        [text for _, text in sorted(words_by_x)]
-        for words_by_x in lines.values()
-    ]
+def log_import(msg):
+    print(msg)
 
 def extract_article_info(page):
-    for line in group_blocks_by_line(page.get_text("blocks")):
-        if line and line[0].lower().startswith("medikament:"):
-            full_line = " ".join(line)
-            match = re.search(r"medikament:\s*(\d+)\s+(.*?)(\d+)\s+stk", full_line.lower())
+    # Dummy-Extraktion (ersetzen mit echter Logik bei Bedarf)
+    text = page.get_text("text")
+    artikel_bezeichnung = ""
+    belegnummer = ""
+    packungsgroesse = 1
+
+    for line in text.split("\n"):
+        if "Medikament:" in line:
+            artikel_bezeichnung = line.replace("Medikament:", "").strip()
+            match = re.search(r"(\d{7,})", artikel_bezeichnung)
             if match:
                 belegnummer = match.group(1)
-                artikel_bezeichnung = f"{match.group(2).strip()} {match.group(3)} STK".upper()
-                packungsgroesse = safe_int(match.group(3))
-                return {
-                    "artikel_bezeichnung": artikel_bezeichnung,
-                    "belegnummer": belegnummer,
-                    "packungsgroesse": packungsgroesse
-                }
+            pg_match = re.search(r"(\d+)\s*STK", artikel_bezeichnung)
+            if pg_match:
+                packungsgroesse = int(pg_match.group(1))
+            break
+
     return {
-        "artikel_bezeichnung": "Unbekannt",
-        "belegnummer": "Unbekannt",
-        "packungsgroesse": 1
+        "artikel_bezeichnung": artikel_bezeichnung.strip(),
+        "belegnummer": belegnummer,
+        "packungsgroesse": packungsgroesse
     }
 
 def detect_layout_from_page(page):
-    text = page.get_text()
-    if "Lfdnr" in text and ("Ein." in text or "Ein" in text):
-        if "BG" in text and "Rez.Nr." in text:
-            return "a"
-        return "b"
-    return None
+    text = page.get_text("text")
+    return "a" if "BG Rez.Nr." in text else "b"
+
+def group_blocks_by_line(blocks):
+    lines = []
+    for b in blocks:
+        lines.append(b[4].strip().split())
+    return lines
+
+def split_name_and_bewegung(tokens, layout):
+    return tokens[:-3], tokens[-3:]
 
 def extract_table_rows_with_article(pdf_path):
     doc = fitz.open(pdf_path)
     all_rows = []
 
+    # 📦 Lade Lieferanten
     lieferanten_map = {}
     if Path(LIEFERANTEN_PATH).exists():
         lieferanten_df = pd.read_csv(LIEFERANTEN_PATH)
         lieferanten_map = {
-            name.lower().strip(): name.strip()
+            normalize(name): name.strip()
             for name in lieferanten_df.iloc[:, 0] if isinstance(name, str)
         }
         lieferanten_keys = list(lieferanten_map.keys())
@@ -83,34 +80,45 @@ def extract_table_rows_with_article(pdf_path):
         meta = extract_article_info(page)
         layout = detect_layout_from_page(page)
         log_import(f"📄 Seite {page.number+1}: erkannter Layout-Typ = {layout}")
+        log_import(f"📦 Artikel-Metadaten: {meta}")
 
         blocks = page.get_text("blocks")
         logical_lines = group_blocks_by_line(blocks)
 
         for tokens in logical_lines:
-            if len(tokens) == 1 and "\n" in tokens[0]:
-                token_list = tokens[0].split("\n")
-            else:
-                token_list = tokens
+            token_list = tokens[0].split("\n") if len(tokens) == 1 and "\n" in tokens[0] else tokens
 
             real_rows = []
             current_row = []
+
             for token in token_list:
-                if re.match(r"^\d{5,}$", token):
-                    if current_row:
+                if re.match(r"^\d{5,}$", token):  # mögliche Lfdnr
+                    if current_row and len(current_row) >= 2 and re.match(r"^\d{2}\.\d{2}\.\d{4}$", current_row[1]):
                         real_rows.append(current_row)
-                    current_row = [token]
+                        current_row = [token]
+                    else:
+                        current_row.append(token)
+                elif re.match(r"^\d{2}\.\d{2}\.\d{4}$", token) and current_row and len(current_row) == 1:
+                    current_row.append(token)
                 else:
                     current_row.append(token)
-            if current_row:
+
+            if current_row and len(current_row) >= 2:
                 real_rows.append(current_row)
+
+            log_import(f"🧮 Seite {page.number+1}: erkannte Real-Rows = {len(real_rows)}")
+            for row in real_rows:
+                log_import(f"📊 Real-Row: {row}")
 
             for row_tokens in real_rows:
                 if len(row_tokens) < 5:
+                    log_import(f"⛔️ Verworfen (zu kurz): {row_tokens}")
                     continue
                 if not re.match(r"^\d{5,}$", row_tokens[0]):
+                    log_import(f"⛔️ Verworfen (keine gültige Lfdnr): {row_tokens}")
                     continue
                 if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", row_tokens[1]):
+                    log_import(f"⛔️ Verworfen (ungültiges Datum): {row_tokens}")
                     continue
 
                 lfdnr = row_tokens[0]
@@ -121,17 +129,15 @@ def extract_table_rows_with_article(pdf_path):
                 while len(data_tokens) < required_len:
                     data_tokens.append("")
 
+                name_tokens, bewegung_tokens = split_name_and_bewegung(data_tokens, layout)
+
                 ein_mge = aus_mge = ""
                 ein_pack = aus_pack = 0
                 bg_rez_nr = ""
-                name_tokens = []
                 lieferant = ""
                 dirty = False
 
-                name_tokens = data_tokens[:-5] if layout == "a" else data_tokens[:-4]
-                bewegung_tokens = data_tokens[-5:] if layout == "a" else data_tokens[-4:]
-
-                numerics = [t for t in bewegung_tokens if re.match(r"^-?\d+$", t)]
+                numerics = [t.strip() for t in bewegung_tokens if re.match(r"^-?\d+(\.0)?$", t.strip())]
                 numerics_ohne_lager = [t for t in numerics if t != "-1"]
 
                 if len(numerics_ohne_lager) == 1:
@@ -142,12 +148,10 @@ def extract_table_rows_with_article(pdf_path):
                     else:
                         ein_mge = val
                         ein_pack = meta.get("packungsgroesse", 1)
-                elif len(numerics_ohne_lager) == 0:
-                    pass
-                else:
+                elif len(numerics_ohne_lager) > 1:
                     dirty = True
 
-                if layout == "a":
+                if layout == "a" and len(data_tokens) >= 2:
                     bg_candidate = data_tokens[-2].strip()
                     if bg_candidate.isdigit():
                         bg_rez_nr = bg_candidate
@@ -156,23 +160,25 @@ def extract_table_rows_with_article(pdf_path):
                     if re.match(r"^[A-Z]\d{6}$", token):
                         name_tokens = name_tokens[:j]
                         break
-
                 name_joined = " ".join(name_tokens).strip()
-                lieferant_match = None
-                lieferant_text = name_joined.lower()
+                name_joined = re.sub(r"^\d{3,6}\s+", "", name_joined)
 
-                match_list = difflib.get_close_matches(lieferant_text, lieferanten_keys, n=1, cutoff=0.9)
+                lieferant_text = re.sub(r"\s+\d+$", "", name_joined).strip()
+                lieferant_norm = normalize(lieferant_text)
+                match_list = difflib.get_close_matches(lieferant_norm, lieferanten_keys, n=1, cutoff=0.9)
+
                 if match_list:
-                    normalized = match_list[0].strip()
-                    lieferant_match = lieferanten_map.get(normalized, normalized)
-
-                if lieferant_match:
-                    lieferant = lieferant_match
+                    matched_key = match_list[0]
+                    lieferant = lieferanten_map[matched_key]
                     name_joined = ""
-                    bg_rez_nr = "0"
                     dirty = False
                     if not ein_mge:
-                        ein_mge = numerics[0] if numerics else "1"
+                        for num in numerics:
+                            if num != "0":
+                                ein_mge = num
+                                break
+                        else:
+                            ein_mge = "1"
                         ein_pack = meta.get("packungsgroesse", 1)
 
                 if ein_mge and aus_mge:
@@ -194,6 +200,7 @@ def extract_table_rows_with_article(pdf_path):
                     "raw_line": " ".join(row_tokens)
                 }
 
+                log_import(f"✅ Zeile übernommen: {row_dict}")
                 all_rows.append((row_dict, meta, layout, dirty))
                 if dirty:
                     log_import(f"⚠️ Dirty-Zeile erkannt: {row_dict['raw_line']}")
@@ -201,26 +208,11 @@ def extract_table_rows_with_article(pdf_path):
     log_import(f"📄 {len(all_rows)} Zeilen aus PDF extrahiert.")
     return all_rows
 
-def split_into_real_rows(tokens):
-    rows = []
-    current_row = []
-    for token in tokens:
-        if re.match(r"^\d{5,}$", token):  # Lfdnr beginnt neue Zeile
-            if current_row:
-                rows.append(current_row)
-            current_row = [token]
-        else:
-            current_row.append(token)
-    if current_row:
-        rows.append(current_row)
-    return rows
-
 def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
     if not Path(LIEFERANTEN_PATH).exists():
         raise FileNotFoundError("Lieferantenliste nicht gefunden")
     lieferanten_df = pd.read_csv(LIEFERANTEN_PATH)
-    
-    # Erzeuge Set mit normalisierten Einzelwörtern aus Lieferantennamen
+
     lieferanten_set = set()
     for val in lieferanten_df.iloc[:, 0]:
         for token in str(val).split():
@@ -241,25 +233,16 @@ def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
         lieferant = ""
         name = name_str
 
-        # 🧪 Debug-Ausgaben
-        print(f"📦 Tokens: {name_tokens}")
-        print(f"🔍 Normalisiert: {token_set}")
-        print(f"🔎 Kandidat für Match: '{name_str}'")
-
         if lieferanten_set & token_set:
             lieferant = next(iter(lieferanten_set & token_set))
             name = ""
-            print(f"✅ Lieferant erkannt: {lieferant}")
 
-        # Whitelist-Check
         if not lieferant:
             if any(w in name_norm for w in whitelist_set):
-                pass  # in Ordnung
+                pass
             else:
-                # Versuche Arzt-/Kundennummern abzuschneiden
                 name = re.split(r"\sK\d{6,}|\s[A-Z]\d{6,}", name_str)[0].strip()
 
-        # Bewegungswerte auswerten
         b1 = safe_int(row_dict["ein_mge"])
         b2 = safe_int(row_dict["aus_mge"])
         ein_mge = aus_mge = ein_pack = aus_pack = 0
