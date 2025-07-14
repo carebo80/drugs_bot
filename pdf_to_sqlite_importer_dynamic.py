@@ -3,12 +3,12 @@ import pandas as pd
 import re
 import sqlite3
 from pathlib import Path
+from utils.logger import log_import
 
 # 🔧 Konfigurierbare Pfade
 LIEFERANTEN_PATH = "data/lieferanten.csv"
 WHITELIST_PATH = "data/whitelist.csv"
 DB_PATH = "data/laufende_liste.db"
-LOG_PATH = "tmp/import.log"
 
 def normalize(text):
     return re.sub(r"[^a-z0-9]", "", text.lower())
@@ -18,9 +18,6 @@ def safe_int(value):
         return int(value)
     except (ValueError, TypeError):
         return 0
-
-def log_import(msg):
-    print(msg)
 
 def extract_article_info(page):
     text = page.get_text("text")

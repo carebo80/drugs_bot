@@ -6,7 +6,9 @@ from pdf_to_sqlite_importer_dynamic import (
     parse_pdf_to_dataframe_dynamic_layout,
     run_import
 )
+from utils.logger import log_import
 
+LOG_PATH = "log/import.log"
 st.set_page_config(page_title="📄 PDF-Import", layout="centered")
 st.title("📄 PDF Upload & Datenbank-Import")
 
@@ -43,8 +45,7 @@ if uploaded_file is not None:
             st.error(f"❌ Fehler beim Import: {e}")
             st.text(traceback.format_exc())
 
-    # 🔍 Logfile anzeigen
-    if os.path.exists("tmp/import.log"):
-        st.subheader("📝 Import-Log:")
-        with open("tmp/import.log", encoding="utf-8") as log_file:
-            st.text(log_file.read())
+        if os.path.exists(LOG_PATH):
+            st.subheader("📝 Import-Log:")
+            with open(LOG_PATH, encoding="utf-8") as log_file:
+                st.text(log_file.read())
