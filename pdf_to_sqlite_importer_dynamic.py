@@ -5,15 +5,15 @@ import re
 import sqlite3
 from pathlib import Path
 from utils.logger import get_log_path, log_import
-from utils.env import get_env
+from utils.env import get_env_var, validate_env
 
-ENV = get_env()
+ENV =get_env_var("APP_ENV")
+LOG_PATH = get_env_var("LOG_PATH")
 
 # 🔧 Konfigurierbare Pfade
 LIEFERANTEN_PATH = "data/lieferanten.csv"
 WHITELIST_PATH = "data/whitelist.csv"
 DB_PATH = "data/laufende_liste.db"
-LOG_PATH = get_log_path()
 
 def normalize(text):
     return re.sub(r"[^a-z0-9]", "", text.lower())

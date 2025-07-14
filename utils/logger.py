@@ -1,16 +1,16 @@
 # utils/logger.py
 import logging
 from pathlib import Path
-from utils.env import get_env
+from utils.env import get_env_var
 
 # Hole den Pfad aus der Umgebung oder nutze Standard
-log_path_str = get_env("LOG_PATH", "log/import.log")
+log_path_str = get_env_var("LOG_PATH", "log/import.log")
 LOG_PATH = Path(log_path_str)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     filename=LOG_PATH,
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )

@@ -8,11 +8,12 @@ from pdf_to_sqlite_importer_dynamic import (
     run_import
 )
 from utils.logger import get_log_path
-from utils.env import get_env
+from utils.env import get_env_var, validate_env
 
-ENV = get_env()
+validate_env(["APP_ENV", "LOG_PATH"])
 
-LOG_PATH = get_log_path()
+ENV = get_env_var("APP_ENV")
+LOG_PATH = get_env_var("LOG_PATH")
 st.set_page_config(page_title="📄 PDF-Import", layout="centered")
 st.title("📄 PDF Upload & Datenbank-Import")
 
