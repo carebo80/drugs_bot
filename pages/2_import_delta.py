@@ -1,3 +1,4 @@
+#2_import_delta.py
 import streamlit as st
 import os
 import traceback
@@ -6,9 +7,12 @@ from pdf_to_sqlite_importer_dynamic import (
     parse_pdf_to_dataframe_dynamic_layout,
     run_import
 )
-from utils.logger import log_import
+from utils.logger import get_log_path
+from utils.env import get_env
 
-LOG_PATH = "log/import.log"
+ENV = get_env()
+
+LOG_PATH = get_log_path()
 st.set_page_config(page_title="📄 PDF-Import", layout="centered")
 st.title("📄 PDF Upload & Datenbank-Import")
 
@@ -45,7 +49,7 @@ if uploaded_file is not None:
             st.error(f"❌ Fehler beim Import: {e}")
             st.text(traceback.format_exc())
 
-        if os.path.exists(LOG_PATH):
-            st.subheader("📝 Import-Log:")
-            with open(LOG_PATH, encoding="utf-8") as log_file:
-                st.text(log_file.read())
+        with open(LOG_PATH, encoding="utf-8") as log_file:
+            lines = log_file.readlines()
+            last_lines = lines[-100:]  # z. B. nur die letzten 100 Zeilen
+            st.text("".join(last_lines))

@@ -1,14 +1,19 @@
+# pdf_to_sqlite_importer_dynamic.py
 import fitz
 import pandas as pd
 import re
 import sqlite3
 from pathlib import Path
-from utils.logger import log_import
+from utils.logger import get_log_path, log_import
+from utils.env import get_env
+
+ENV = get_env()
 
 # 🔧 Konfigurierbare Pfade
 LIEFERANTEN_PATH = "data/lieferanten.csv"
 WHITELIST_PATH = "data/whitelist.csv"
 DB_PATH = "data/laufende_liste.db"
+LOG_PATH = get_log_path()
 
 def normalize(text):
     return re.sub(r"[^a-z0-9]", "", text.lower())
@@ -132,7 +137,7 @@ def extract_table_rows_with_article(pdf_path):
             else:
                 i += 1
 
-        print(f"📄 Seite {page_num+1}: {len(rows)} Real-Rows erkannt.")
+        log_import(f"📄 Seite {page_num+1}: {len(rows)} Real-Rows erkannt.")
 
         for r in rows:
             if len(r) < 5:
@@ -145,7 +150,7 @@ def extract_table_rows_with_article(pdf_path):
 
             # Footer-Zeilen ausschließen (z. B. "Gesamt:" oder "Total")
             if any(tok.lower().startswith("gesamt") or tok.lower().startswith("total") for tok in remaining):
-                print(f"⛔ Footer-Zeile erkannt: {remaining}")
+                log_import(f"⛔ Footer-Zeile erkannt: {remaining}")
                 continue
 
             ein_mge = aus_mge = bg_rez_nr = ""
@@ -176,10 +181,10 @@ def extract_table_rows_with_article(pdf_path):
                 "bg_rez_nr": bg_rez_nr if layout == "a" else ""
             }
 
-            print(f"🔍 Tokens: {[name, ein_mge, aus_mge, bg_rez_nr]}")
+            log_import(f"🔍 Tokens: {[name, ein_mge, aus_mge, bg_rez_nr]}")
             all_rows.append((row_dict, meta, layout, False))
 
-    print(f"✅ Gesamt extrahierte Zeilen: {len(all_rows)}")
+    log_import(f"✅ Gesamt extrahierte Zeilen: {len(all_rows)}")
     return all_rows
 
 def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
@@ -246,9 +251,10 @@ def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
             ]
 
             if any(t.startswith("Gesamt") for t in tokens):
-                print(f"⛔ Footer-Zeile erkannt: {tokens}")
+                log_import(f"⛔ Footer-Zeile erkannt: {tokens}", level="debug")  # statt immer log_import()
+
             else:
-                print(f"🔍 Tokens: {tokens}")
+                log_import(f"🔍 Tokens: {tokens}", level="debug")
 
                 ein_raw, aus_raw, lager_raw, bg_token = tokens[-4:]
 
@@ -260,14 +266,13 @@ def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
 
                 # Bewegung interpretieren
                 if ein_val and not aus_val:
-                    print(f"🟢 Eingang erkannt: {ein_val}")
+                    log_import(f"🟢 Eingang erkannt: {ein_val}", level="debug")
                 elif aus_val and not ein_val:
-                    print(f"🔴 Ausgang erkannt: {aus_val}")
+                   log_import(f"🔴 Ausgang erkannt: {aus_val}", level="debug")
                 elif not ein_val and not aus_val:
-                    print(f"⚪ Keine Bewegung erkannt. Möglicherweise Lager oder nur BG-Nr.: {bg_token}")
+                    log_import(f"⚪ Keine Bewegung erkannt. Möglicherweise Lager oder nur BG-Nr.: {bg_token}", level="debug")
                 else:
-                    print(f"⚠️ Ungültige Kombination: Ein={ein_raw}, Aus={aus_raw}, BG={bg_token}")
-
+                    log_import(f"⚠️ Ungültige Kombination: Ein={ein_raw}, Aus={aus_raw}, BG={bg_token}", level="debug")
 
             ein_mge, aus_mge, dirty_m = detect_bewegung(tokens)
             dirty = dirty or dirty_m  # kombiniere mit externem dirty-Flag
@@ -300,10 +305,10 @@ def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
 
 def run_import(parsed_df):
     if not isinstance(parsed_df, pd.DataFrame):
-        print("❌ Fehler: Übergabe ist kein DataFrame")
+        log_import("❌ Fehler: Übergabe ist kein DataFrame")
         return
     if parsed_df.empty:
-        print("⚠️ Keine gültigen Zeilen zum Import.")
+        log_import("⚠️ Keine gültigen Zeilen zum Import.")
         return
 
     # Falls fälschlich lfdnr mitkommt: raus damit
@@ -312,7 +317,6 @@ def run_import(parsed_df):
 
     with sqlite3.connect(DB_PATH) as conn:
         parsed_df.to_sql("bewegungen", conn, if_exists="append", index=False)
-        print(f"✅ {len(parsed_df)} Zeilen erfolgreich importiert.")
         log_import(f"✅ {len(parsed_df)} Zeilen erfolgreich in DB importiert.")
 
 

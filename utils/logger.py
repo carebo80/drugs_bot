@@ -1,8 +1,11 @@
 # utils/logger.py
 import logging
 from pathlib import Path
+from utils.env import get_env
 
-LOG_PATH = Path("log/import.log")
+# Hole den Pfad aus der Umgebung oder nutze Standard
+log_path_str = get_env("LOG_PATH", "log/import.log")
+LOG_PATH = Path(log_path_str)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -28,3 +31,6 @@ def log_import(msg, level="info"):
         logging.error(msg)
     else:
         logging.info(msg)
+
+def get_log_path():
+    return LOG_PATH

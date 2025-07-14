@@ -22,3 +22,6 @@ upload/
 # Streamlit Cache
 .streamlit/
 *.cache/
+
+# Environment
+.env
