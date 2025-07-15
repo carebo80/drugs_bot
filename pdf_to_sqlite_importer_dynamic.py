@@ -75,50 +75,69 @@ def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
 
     return name, bg_rez_nr
 
-def detect_bewegung(tokens):
+def detect_bewegung(tokens: list[str], is_lieferant: bool) -> tuple[str, str, bool]:
     """
-    Analysiert eine Liste von Tokens und erkennt Bewegungswerte.
-    Gibt ein Tupel zurück: (ein_mge, aus_mge, dirty)
+    Liefert (ein_mge, aus_mge, dirty)
+    - Zahlen als string zurück ("" bei leer)
+    - keine automatische 0
+    - is_lieferant steuert Verhalten
     """
-    ein_mge = aus_mge = 0
+    # Nur echte Zahlen als string extrahieren (auch '0', keine Dezimalzahlen)
+    digits = [t for t in tokens if re.fullmatch(r"-?\d+", t)]
+
+    ein_mge = ""
+    aus_mge = ""
     dirty = False
 
-    for i in range(len(tokens) - 1, 1, -1):
-        t1, t2, t3 = tokens[i - 2], tokens[i - 1], tokens[i]
+    if not digits:
+        return "", "", True
 
-        if re.fullmatch(r"\d+", t1) and t2.strip() == "" and re.fullmatch(r"\d+", t3):
-            return int(t1), 0, False
-        elif t1.strip() == "" and re.fullmatch(r"\d+", t2) and re.fullmatch(r"\d+", t3):
-            return 0, int(t2), False
-        elif re.fullmatch(r"\d+", t1) and re.fullmatch(r"\d+", t2):
-            return 0, 0, True
-        elif re.fullmatch(r"\d+", t1) and re.fullmatch(r"\d+", t3) and t2 == "0":
-            return int(t1), 0, False
-        elif t1 == "0" and re.fullmatch(r"\d+", t2) and re.fullmatch(r"\d+", t3):
-            return 0, int(t2), False
+    digits_int = [int(d) for d in digits]
+    digits_rev = digits[::-1]  # für spätere Indexzugriffe
 
-    return 0, 0, True
+    if is_lieferant:
+        # Nehme 3. Zahl von rechts (Ein)
+        if len(digits_rev) >= 3:
+            val = digits_rev[2]
+            ein_mge = val if val != "-1" else ""  # Lagerwert vermeiden
+        elif len(digits_rev) >= 1:
+            ein_mge = digits_rev[0]
+        else:
+            dirty = True
+    else:
+        # Letzte ist Lager
+        lager_val = digits_rev[0] if len(digits_rev) >= 1 else None
+        aus_val = digits_rev[1] if len(digits_rev) >= 2 else None
+        ein_val = digits_rev[2] if len(digits_rev) >= 3 else None
+
+        if ein_val and not aus_val:
+            ein_mge = ein_val
+        elif aus_val and not ein_val:
+            aus_mge = aus_val
+        elif not ein_val and not aus_val:
+            dirty = True
+        else:
+            dirty = True
+
+    return str(ein_mge).strip(), str(aus_mge).strip(), dirty
 
 def extract_table_rows_with_article(pdf_path):
     doc = fitz.open(pdf_path)
     all_rows = []
 
     for page_num, page in enumerate(doc):
-        text = page.get_text("text")
-        lines = text.splitlines()
         meta = extract_article_info(page)
         layout = detect_layout_from_page(page)
 
-        current_line_tokens = []
-        rows = []
+        blocks = page.get_text("blocks")
+        lines = [b[4].strip() for b in sorted(blocks, key=lambda b: (round(b[1], 1), b[0])) if b[4].strip()]
 
+        current_line_tokens = []
         for line in lines:
-            tokens = line.strip().split()
-            if not tokens:
-                continue
-            current_line_tokens.extend(tokens)
+            current_line_tokens.extend(line.strip().split())
 
         i = 0
+        rows = []
         while i < len(current_line_tokens) - 1:
             token = current_line_tokens[i]
             next_token = current_line_tokens[i + 1]
@@ -126,51 +145,68 @@ def extract_table_rows_with_article(pdf_path):
             if re.fullmatch(r"\d{5,}", token) and re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", next_token):
                 j = i + 2
                 while j < len(current_line_tokens):
-                    if (re.fullmatch(r"\d{5,}", current_line_tokens[j]) and
-                        j + 1 < len(current_line_tokens) and
-                        re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", current_line_tokens[j + 1])):
+                    if re.fullmatch(r"\d{5,}", current_line_tokens[j]) and j + 1 < len(current_line_tokens) and re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", current_line_tokens[j + 1]):
                         break
                     j += 1
+
                 row_tokens = current_line_tokens[i:j]
-                rows.append(row_tokens)
+
+                footer_keywords = ("gesamt", "total")
+                footer_index = next((k for k, tok in enumerate(row_tokens) if any(tok.lower().startswith(f) for f in footer_keywords)), None)
+                if footer_index is not None:
+                    log_import(f"\u26d8 Footer erkannt, Abschneiden ab Index {footer_index}: {row_tokens}")
+                    row_tokens = row_tokens[:footer_index]
+
+                if len(row_tokens) >= 5:
+                    rows.append(row_tokens)
+                else:
+                    log_import(f"\u26a0\ufe0f Ignorierte Kurz-Zeile nach Footer-Schnitt: {row_tokens}")
+
                 i = j
             else:
                 i += 1
 
         log_import(f"📄 Seite {page_num+1}: {len(rows)} Real-Rows erkannt.")
 
+        # Lade Lieferantenliste
+        if not Path(LIEFERANTEN_PATH).exists():
+            raise FileNotFoundError("Lieferantenliste nicht gefunden")
+        lieferanten_df = pd.read_csv(LIEFERANTEN_PATH)
+        lieferanten_set = set(normalize(tok) for val in lieferanten_df.iloc[:, 0].dropna() for tok in str(val).split())
+
         for r in rows:
             if len(r) < 5:
                 continue
 
-            # Grundstruktur: Lfdnr + Datum + Name + Mengen + evtl. BG-Nr
             lfdnr = r[0]
             datum = r[1]
             remaining = r[2:]
 
-            # Footer-Zeilen ausschließen (z. B. "Gesamt:" oder "Total")
-            if any(tok.lower().startswith("gesamt") or tok.lower().startswith("total") for tok in remaining):
-                log_import(f"⛔ Footer-Zeile erkannt: {remaining}")
-                continue
+            # Lieferantenerkennung
+            tokens_norm = set(normalize(t) for t in remaining)
+            is_lieferant = bool(lieferanten_set & tokens_norm)
 
-            ein_mge = aus_mge = bg_rez_nr = ""
-            tokens_used = 0
+            # Nur numerische Tokens extrahieren (auch '0', aber keine Dezimalzahlen)
+            numeric_tokens = [t for t in remaining if re.fullmatch(r"-?\d+", t)]
+            log_import(f"💬 Vor detect_bewegung: Tokens={numeric_tokens}")
+            ein_mge, aus_mge, dirty = detect_bewegung(numeric_tokens, is_lieferant)
 
-            # Rückwärtsanalyse: Mengen und ggf. BG-Nr extrahieren
-            for i in range(1, min(4, len(remaining)) + 1):
-                token = remaining[-i]
-                if not bg_rez_nr and re.fullmatch(r"\d{6,}", token):
-                    bg_rez_nr = token
-                    tokens_used += 1
-                elif not aus_mge and re.fullmatch(r"\d+", token):
-                    aus_mge = token
-                    tokens_used += 1
-                elif not ein_mge and re.fullmatch(r"\d+", token):
-                    ein_mge = token
-                    tokens_used += 1
+            # BG Rez.Nr. nur für Layout A
+            bg_rez_nr = ""
+            if layout == "a":
+                for tok in reversed(remaining):
+                    if re.fullmatch(r"\d{7,9}", tok):
+                        bg_rez_nr = tok
+                        break
 
-            name_tokens = remaining[:len(remaining) - tokens_used]
+            if not ein_mge and not aus_mge:
+                log_import(f"⚪ Keine Bewegung erkannt → dirty: {remaining}")
+
+            used_tokens = {ein_mge, aus_mge, bg_rez_nr}
+            name_tokens = [t for t in remaining if t not in used_tokens and not re.fullmatch(r"0+", t)]
             name = " ".join(name_tokens)
+
+            log_import(f"🔍 Tokens: {[name, ein_mge, aus_mge, bg_rez_nr]}")
 
             row_dict = {
                 "lfdnr": lfdnr,
@@ -181,8 +217,7 @@ def extract_table_rows_with_article(pdf_path):
                 "bg_rez_nr": bg_rez_nr if layout == "a" else ""
             }
 
-            log_import(f"🔍 Tokens: {[name, ein_mge, aus_mge, bg_rez_nr]}")
-            all_rows.append((row_dict, meta, layout, False))
+            all_rows.append((row_dict, meta, layout, dirty))
 
     log_import(f"✅ Gesamt extrahierte Zeilen: {len(all_rows)}")
     return all_rows
@@ -246,7 +281,7 @@ def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
             tokens = [
                 str(row_dict.get("ein_mge", "")).strip(),
                 str(row_dict.get("aus_mge", "")).strip(),
-                "-3",  # simuliertes Lagerfeld, da du es im realen Token nicht brauchst, kannst du später ggf. dynamisch einsetzen
+                "0",  # neutraler Platzhalter statt -3
                 str(row_dict.get("bg_rez_nr", "")).strip()
             ]
 
@@ -273,9 +308,12 @@ def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
                     log_import(f"⚪ Keine Bewegung erkannt. Möglicherweise Lager oder nur BG-Nr.: {bg_token}", level="debug")
                 else:
                     log_import(f"⚠️ Ungültige Kombination: Ein={ein_raw}, Aus={aus_raw}, BG={bg_token}", level="debug")
+            log_import(f"💬 Vor detect_bewegung: Tokens={tokens}")
 
-            ein_mge, aus_mge, dirty_m = detect_bewegung(tokens)
-            dirty = dirty or dirty_m  # kombiniere mit externem dirty-Flag
+            ein_mge = safe_int(row_dict.get("ein_mge"))
+            aus_mge = safe_int(row_dict.get("aus_mge"))
+
+            log_import(f"📦 Bewegung übernommen: Ein={ein_mge}, Aus={aus_mge}, dirty={dirty}", level="debug")
 
             ein_pack = aus_pack = 0
             if ein_mge:
