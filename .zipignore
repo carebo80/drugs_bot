@@ -4,5 +4,4 @@ __pycache__/
 .venv/
 .git/
 .env
-*.csv
 *.zip
