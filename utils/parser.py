@@ -1,5 +1,6 @@
 import pandas as pd
 import re
+from utils.helpers import detect_bewegung_from_structured_tokens
 
 def is_valid_token(t):
     t_clean = t.strip()
@@ -49,38 +50,6 @@ def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
 
     df = pd.DataFrame(parsed_rows)
     return df
-def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str):
-    ein_raw, aus_raw = "", ""
-    ein_mge, aus_mge = 0, 0
-    dirty = False
-    bg_rez_nr = ""
-
-    # Slotpositionen
-    try:
-        if layout == "a" and len(tokens) >= 12:
-            ein_raw = tokens[-5]
-            aus_raw = tokens[-4]
-            bg_rez_nr = tokens[-2]
-        elif layout == "b" and len(tokens) >= 11:
-            ein_raw = tokens[-4]
-            aus_raw = tokens[-3]
-        else:
-            dirty = True
-    except Exception:
-        dirty = True
-
-    # Bewegung interpretieren
-    try:
-        if ein_raw and ein_raw.isdigit():
-            ein_mge = int(ein_raw)
-        if aus_raw and aus_raw.isdigit():
-            aus_mge = int(aus_raw)
-        if (ein_mge > 0 and aus_mge > 0) or (ein_mge == 0 and aus_mge == 0):
-            dirty = True
-    except Exception:
-        dirty = True
-
-    return ein_mge, aus_mge, bg_rez_nr, dirty
 
 def split_name_and_bewegung(tokens: list[str], layout: str) -> tuple[str, list[str], bool]:
     """

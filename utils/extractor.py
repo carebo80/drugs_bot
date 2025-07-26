@@ -2,8 +2,8 @@
 import csv
 import fitz
 import re
-from utils.helpers import normalize
-from utils.parser import detect_bewegung_from_structured_tokens
+from utils.helpers import normalize, detect_bewegung_from_structured_tokens
+from utils.logger import log_import
 
 def extract_table_rows_with_article(pdf_path: str):
     doc = fitz.open(pdf_path)
@@ -79,8 +79,25 @@ def extract_table_rows_with_article(pdf_path: str):
                 lieferant = name_cleaned if normalize(name_cleaned) in {normalize(l) for l in lieferanten_set} else ""
 
                 bg_rez_nr = ""
+                # Korrekte Extraktion der letzten Felder (stellenweise noch Rohwerte)
                 bewegung_tokens = tokens[-5:] if layout == "a" else tokens[-4:]
+
+                # Prüfen, ob die letzten 3–5 Felder wirklich nur aus Zahl oder leer bestehen
+                bewegung_values = [t for t in bewegung_tokens if re.match(r'^-?\d+$', t) or t == '']
+
+                # wenn nicht genau 3 (b) oder 4 (a) numerische Werte → dirty
+                if (layout == "a" and len(bewegung_values) < 3) or (layout == "b" and len(bewegung_values) < 2):
+                    dirty = True
+                    ein_mge = aus_mge = 0
+                else:
+                    ein_mge, aus_mge, *_ = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
+
                 ein_mge, aus_mge, bg_rez_nr, dirty = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
+                
+                log_import(f"🧪 Bewegungstokens: {bewegung_tokens}")
+                log_import(f"🔎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
+                log_import(f"📦 Tokens: {tokens}")
+
                 if layout == "a" and len(bewegung_tokens) >= 4:
                     candidate = bewegung_tokens[-2]
                     if candidate.isdigit() and len(candidate) == 8:

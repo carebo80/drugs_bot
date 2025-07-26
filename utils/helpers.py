@@ -3,6 +3,7 @@ import re
 import csv
 import unicodedata
 from utils.logger import log_import
+import os
 
 def get_env_var(key: str) -> str:
     return os.getenv(key, "")
@@ -79,3 +80,28 @@ def clean_name_tokens(tokens: list[str]) -> list[str]:
 def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     return " ".join(text.strip().split())
+
+def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str):
+    """
+    tokens: Die letzten 5 (Layout A) oder 4 (Layout B) Tokens einer Zeile.
+    layout: "a" oder "b"
+    Rückgabe: (ein_mge, aus_mge, bg_rez_nr, dirty)
+    """
+    try:
+        if layout == "a" and len(tokens) >= 5:
+            ein_raw, aus_raw, lager, bg_rez_nr, abh = tokens[-5:]
+        elif layout == "b" and len(tokens) >= 4:
+            ein_raw, aus_raw, lager, abh = tokens[-4:]
+            bg_rez_nr = ""
+        else:
+            return (0, 0, "", True)
+
+        def parse_val(val):
+            return int(val) if val.strip().isdigit() else 0
+
+        ein = parse_val(ein_raw)
+        aus = parse_val(aus_raw)
+        dirty = not ((ein > 0 and aus == 0) or (aus > 0 and ein == 0))
+        return (ein, aus, bg_rez_nr, dirty)
+    except Exception:
+        return (0, 0, "", True)
