@@ -1,7 +1,6 @@
 # utils/env.py
 import os
 from dotenv import load_dotenv
-from pathlib import Path
 
 # .env laden, wenn vorhanden
 load_dotenv()

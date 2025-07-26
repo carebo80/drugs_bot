@@ -1,10 +1,7 @@
 # utils/helpers.py
 import re
 import csv
-import os
 import unicodedata
-from analyze_pdf_blocks import LIEFERANTEN_PATH
-from utils.env import get_env_var
 from utils.logger import log_import
 
 def get_env_var(key: str) -> str:

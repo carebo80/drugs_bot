@@ -1,7 +1,6 @@
-import fitz
+import pandas as pd
 import re
-from utils.extractor import extract_table_rows_with_article
-from utils.helpers import normalize
+from utils.parser import detect_bewegung_from_structured_tokens  # optional (Selbstimport)
 
 def is_valid_token(t):
     t_clean = t.strip()

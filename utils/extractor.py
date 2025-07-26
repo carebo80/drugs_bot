@@ -1,6 +1,9 @@
+# utils/extractor.py
 import csv
 import fitz
 import re
+from utils.helpers import normalize
+from utils.parser import detect_bewegung_from_structured_tokens
 
 def extract_table_rows_with_article(pdf_path: str):
     doc = fitz.open(pdf_path)
