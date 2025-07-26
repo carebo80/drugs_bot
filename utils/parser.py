@@ -107,3 +107,6 @@ def split_name_and_bewegung(tokens: list[str], layout: str) -> tuple[str, list[s
 
     name_str = " ".join(name_tokens_cleaned).strip()
     return (name_str, bewegung_tokens, False)
+
+def detect_layout_from_page(page):
+    return "a" if "BG Rez.Nr." in page.get_text("text") else "b"
