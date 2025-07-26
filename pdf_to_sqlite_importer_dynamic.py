@@ -1,4 +1,5 @@
 # pdf_to_sqlite_importer_dynamic.py
+import csv
 import fitz
 import pandas as pd
 import re
@@ -6,11 +7,12 @@ import sqlite3
 from pathlib import Path
 from utils.logger import get_log_path, log_import
 from utils.env import get_env_var, validate_env
+from utils.helpers import is_lieferant
+from typing import List, Optional, Tuple, Dict, Any
 
-ENV =get_env_var("APP_ENV")
+ENV = get_env_var("APP_ENV")
 LOG_PATH = get_env_var("LOG_PATH")
 
-# 🔧 Konfigurierbare Pfade
 LIEFERANTEN_PATH = "data/lieferanten.csv"
 WHITELIST_PATH = "data/whitelist.csv"
 DB_PATH = "data/laufende_liste.db"
@@ -22,32 +24,79 @@ def safe_int(value):
     try:
         return int(value)
     except (ValueError, TypeError):
-        return 0
+        return None
+
+def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
+    name_clean = re.sub(r"\b[NJT]\d{6}\b", "", name).strip()
+    match = re.search(r"\b\d{8}\b", name_clean)
+    if match:
+        bg_rez_nr = match.group(0)
+        name_clean = name_clean.replace(bg_rez_nr, "").strip()
+    name_clean = re.sub(r"^\d+\s+", "", name_clean)
+    name_clean = re.sub(r"\b\d{1,3}\b", "", name_clean).strip()
+    name_clean = re.sub(r"\s+", " ", name_clean)
+    return name_clean, bg_rez_nr
+def clean_name_tokens(tokens: list[str]) -> list[str]:
+    cleaned = []
+    for token in tokens:
+        if re.fullmatch(r"[A-Z]\d{6}", token):
+            break
+        cleaned.append(token)
+    return cleaned
+
+import re
+
+def split_name_and_bewegung(tokens: list[str], layout: str) -> tuple[str, list[str], bool]:
+    """
+    Trennt Namens-Tokens von Bewegungstokens anhand Layout.
+    Entfernt Arztnummern (z. B. Z031031) aus dem Namensteil.
+    Nur gültig, wenn die letzten 5 (a) bzw. 4 (b) Tokens numerisch oder leer (\n etc.) sind.
+    """
+    bewegung_len = 5 if layout == "a" else 4
+
+    if len(tokens) < bewegung_len:
+        return ("", [], True)
+
+    bewegung_tokens = tokens[-bewegung_len:]
+
+    def is_valid_token(t):
+        t_clean = t.strip()
+        return t_clean == "" or re.fullmatch(r"\d+", t_clean)
+
+    if not all(is_valid_token(t) for t in bewegung_tokens):
+        return ("", bewegung_tokens, True)  # Dirty, weil z. B. Namen in Bewegungstokens
+
+    name_tokens = tokens[:-bewegung_len]
+
+    # Arztnummern entfernen (Z031031, T464901 usw.)
+    name_tokens_cleaned = [t for t in name_tokens if not re.match(r"^[A-Z]\d{6,}$", t.strip())]
+
+    if not name_tokens_cleaned:
+        return ("", bewegung_tokens, True)
+
+    name_str = " ".join(name_tokens_cleaned).strip()
+    return (name_str, bewegung_tokens, False)
 
 def extract_article_info(page):
     text = page.get_text("text")
     artikel_bezeichnung = ""
     belegnummer = ""
     packungsgroesse = 1
-
     for line in text.split("\n"):
         if "Medikament:" in line:
+            # Entferne Prefix
             artikel_line = line.replace("Medikament:", "").strip()
-            
-            # Neu: Suche an beliebiger Stelle nach 4–8-stelliger Belegnummer
+            # Extrahiere Belegnummer
             match = re.search(r"\b(\d{4,8})\b", artikel_line)
             if match:
                 belegnummer = match.group(1)
-                artikel_bezeichnung = artikel_line.replace(belegnummer, "").strip()
-            else:
-                artikel_bezeichnung = artikel_line
-
-            # Packungsgröße bleibt
+                artikel_line = artikel_line.replace(belegnummer, "").strip()
+            artikel_bezeichnung = artikel_line
+            # Extrahiere Packungsgröße
             pg_match = re.search(r"(\d+)\s*STK", artikel_line)
             if pg_match:
                 packungsgroesse = int(pg_match.group(1))
             break
-
     return {
         "artikel_bezeichnung": artikel_bezeichnung,
         "belegnummer": belegnummer or "Unbekannt",
@@ -57,289 +106,204 @@ def extract_article_info(page):
 def detect_layout_from_page(page):
     return "a" if "BG Rez.Nr." in page.get_text("text") else "b"
 
-def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
-    # Wenn im Namen eine echte BG-Nummer steckt, extrahiere sie
-    matches = re.findall(r"\b\d{7,9}\b", name)
-    if matches and (not bg_rez_nr or bg_rez_nr == "0"):
-        bg_rez_nr = matches[-1]
-        name = re.sub(r"\b" + re.escape(bg_rez_nr) + r"\b", "", name)
+def pre_fix_date(line: str) -> str:
+    line = re.sub(r'(\d{2})\s*[\.\n]+\s*(\d{2})[\.\n]+(\d{4})', r'\1.\2.\3', line)
+    return line
 
-    # Entferne Arzt-Kennungen (z.B. T123456) und alles danach
-    name = re.split(r"\s(?:K|T)\d{6,}", name)[0]
+def slot_preserving_tokenizer_fixed(line: str) -> list[str]:
+    log_import(f"\n🔍 Input-Zeile: {repr(line)}")
+    if line.strip().lower().startswith("gesamt"):
+        return []
+    tokens = re.split(r'(\s+)', line)
+    log_import(f"🎉 Tokens RAW: {tokens} (Anzahl: {len(tokens)})")
+    return tokens
 
-    # Entferne unnötige 1–3-stellige Zahlen (z. B. Vorangestellte Kundennummern)
-    name = re.sub(r"\b\d{1,3}\b", "", name)
-
-    # Mehrfache Leerzeichen bereinigen
-    name = re.sub(r"\s+", " ", name).strip()
-
-    return name, bg_rez_nr
-
-def detect_bewegung(tokens: list[str], is_lieferant: bool) -> tuple[str, str, bool]:
-    """
-    Liefert (ein_mge, aus_mge, dirty)
-    - Zahlen als string zurück ("" bei leer)
-    - keine automatische 0
-    - is_lieferant steuert Verhalten
-    """
-    # Nur echte Zahlen als string extrahieren (auch '0', keine Dezimalzahlen)
-    digits = [t for t in tokens if re.fullmatch(r"-?\d+", t)]
-
-    ein_mge = ""
-    aus_mge = ""
+def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str):
+    ein_raw, aus_raw = "", ""
+    ein_mge, aus_mge = 0, 0
     dirty = False
+    bg_rez_nr = ""
 
-    if not digits:
-        return "", "", True
-
-    digits_int = [int(d) for d in digits]
-    digits_rev = digits[::-1]  # für spätere Indexzugriffe
-
-    if is_lieferant:
-        # Nehme 3. Zahl von rechts (Ein)
-        if len(digits_rev) >= 3:
-            val = digits_rev[2]
-            ein_mge = val if val != "-1" else ""  # Lagerwert vermeiden
-        elif len(digits_rev) >= 1:
-            ein_mge = digits_rev[0]
+    # Slotpositionen
+    try:
+        if layout == "a" and len(tokens) >= 12:
+            ein_raw = tokens[-5]
+            aus_raw = tokens[-4]
+            bg_rez_nr = tokens[-2]
+        elif layout == "b" and len(tokens) >= 11:
+            ein_raw = tokens[-4]
+            aus_raw = tokens[-3]
         else:
             dirty = True
-    else:
-        # Letzte ist Lager
-        lager_val = digits_rev[0] if len(digits_rev) >= 1 else None
-        aus_val = digits_rev[1] if len(digits_rev) >= 2 else None
-        ein_val = digits_rev[2] if len(digits_rev) >= 3 else None
+    except Exception:
+        dirty = True
 
-        if ein_val and not aus_val:
-            ein_mge = ein_val
-        elif aus_val and not ein_val:
-            aus_mge = aus_val
-        elif not ein_val and not aus_val:
+    # Bewegung interpretieren
+    try:
+        if ein_raw and ein_raw.isdigit():
+            ein_mge = int(ein_raw)
+        if aus_raw and aus_raw.isdigit():
+            aus_mge = int(aus_raw)
+        if (ein_mge > 0 and aus_mge > 0) or (ein_mge == 0 and aus_mge == 0):
             dirty = True
-        else:
-            dirty = True
+    except Exception:
+        dirty = True
 
-    return str(ein_mge).strip(), str(aus_mge).strip(), dirty
+    return ein_mge, aus_mge, bg_rez_nr, dirty
 
-def extract_table_rows_with_article(pdf_path):
+def split_multiple_rows(text):
+    zeilen = []
+    matches = re.finditer(r"\b\d{5,}\b\s+\d{2}\.\d{2}\.\d{4}", text)
+    starts = [m.start() for m in matches]
+    starts.append(len(text))
+    for i in range(len(starts) - 1):
+        chunk = text[starts[i]:starts[i+1]].strip()
+        if chunk:
+            zeilen.append(chunk)
+    return zeilen
+
+def extract_table_rows_with_article(pdf_path: str):
     doc = fitz.open(pdf_path)
     all_rows = []
+    
+    # Lieferantenliste laden
+    lieferanten_set = set()
+    try:
+        with open("data/lieferanten.csv", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if row:
+                    lieferanten_set.add(row[0].strip().upper())
+    except Exception:
+        pass
 
-    for page_num, page in enumerate(doc):
-        meta = extract_article_info(page)
-        layout = detect_layout_from_page(page)
+    for page in doc:
+        text = page.get_text("text")
+        layout = "a" if "BG Rez.Nr." in text else "b"
 
-        blocks = page.get_text("blocks")
-        lines = [b[4].strip() for b in sorted(blocks, key=lambda b: (round(b[1], 1), b[0])) if b[4].strip()]
+        # Artikelzeile
+        artikel_bezeichnung, belegnummer, packungsgroesse = "", "", 1
+        for line in text.splitlines():
+            if "STK" in line and re.search(r"\d{5,}", line):
+                artikel_bezeichnung = re.sub(r"\s*\d+\s*STK.*", "", line).strip()
+                match = re.search(r"\b(\d{5,})\b", line)
+                if match:
+                    belegnummer = match.group(1)
+                match_pg = re.search(r"(\d+)\s*STK", line)
+                if match_pg:
+                    packungsgroesse = int(match_pg.group(1))
+                break
 
-        current_line_tokens = []
-        for line in lines:
-            current_line_tokens.extend(line.strip().split())
+        for block in page.get_text("blocks"):
+            block_text = block[4].strip()
+            rows = re.split(r"(?=\d{5,}\s+\d{2}\.\d{2}\.\d{4})", block_text.replace("\n", " "))
+            for zeile in rows:
+                zeile = zeile.strip()
+                if not re.match(r"^\d{5,}\s+\d{2}\.\d{2}\.\d{4}", zeile):
+                    continue
 
-        i = 0
-        rows = []
-        while i < len(current_line_tokens) - 1:
-            token = current_line_tokens[i]
-            next_token = current_line_tokens[i + 1]
+                tokens = zeile.split()
+                if len(tokens) < 6:
+                    continue
 
-            if re.fullmatch(r"\d{5,}", token) and re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", next_token):
-                j = i + 2
-                while j < len(current_line_tokens):
-                    if re.fullmatch(r"\d{5,}", current_line_tokens[j]) and j + 1 < len(current_line_tokens) and re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", current_line_tokens[j + 1]):
-                        break
-                    j += 1
+                lfdnr, datum = tokens[0], tokens[1]
+                kundennr = tokens[2] if tokens[2].isdigit() else ""
 
-                row_tokens = current_line_tokens[i:j]
-
-                footer_keywords = ("gesamt", "total")
-                footer_index = next((k for k, tok in enumerate(row_tokens) if any(tok.lower().startswith(f) for f in footer_keywords)), None)
-                if footer_index is not None:
-                    log_import(f"\u26d8 Footer erkannt, Abschneiden ab Index {footer_index}: {row_tokens}")
-                    row_tokens = row_tokens[:footer_index]
-
-                if len(row_tokens) >= 5:
-                    rows.append(row_tokens)
-                else:
-                    log_import(f"\u26a0\ufe0f Ignorierte Kurz-Zeile nach Footer-Schnitt: {row_tokens}")
-
-                i = j
-            else:
-                i += 1
-
-        log_import(f"📄 Seite {page_num+1}: {len(rows)} Real-Rows erkannt.")
-
-        # Lade Lieferantenliste
-        if not Path(LIEFERANTEN_PATH).exists():
-            raise FileNotFoundError("Lieferantenliste nicht gefunden")
-        lieferanten_df = pd.read_csv(LIEFERANTEN_PATH)
-        lieferanten_set = set(normalize(tok) for val in lieferanten_df.iloc[:, 0].dropna() for tok in str(val).split())
-
-        for r in rows:
-            if len(r) < 5:
-                continue
-
-            lfdnr = r[0]
-            datum = r[1]
-            remaining = r[2:]
-
-            # Lieferantenerkennung
-            tokens_norm = set(normalize(t) for t in remaining)
-            is_lieferant = bool(lieferanten_set & tokens_norm)
-
-            # Nur numerische Tokens extrahieren (auch '0', aber keine Dezimalzahlen)
-            numeric_tokens = [t for t in remaining if re.fullmatch(r"-?\d+", t)]
-            log_import(f"💬 Vor detect_bewegung: Tokens={numeric_tokens}")
-            ein_mge, aus_mge, dirty = detect_bewegung(numeric_tokens, is_lieferant)
-
-            # BG Rez.Nr. nur für Layout A
-            bg_rez_nr = ""
-            if layout == "a":
-                for tok in reversed(remaining):
-                    if re.fullmatch(r"\d{7,9}", tok):
-                        bg_rez_nr = tok
+                arzt_index = -1
+                for i, t in enumerate(tokens):
+                    if re.fullmatch(r"[NZJT]\d{6}", t):
+                        arzt_index = i
                         break
 
-            if not ein_mge and not aus_mge:
-                log_import(f"⚪ Keine Bewegung erkannt → dirty: {remaining}")
+                name_tokens = tokens[3:arzt_index] if arzt_index != -1 else tokens[3:-5 if layout == "a" else -4]
 
-            used_tokens = {ein_mge, aus_mge, bg_rez_nr}
-            name_tokens = [t for t in remaining if t not in used_tokens and not re.fullmatch(r"0+", t)]
-            name = " ".join(name_tokens)
+                name_raw = " ".join(name_tokens)
 
-            log_import(f"🔍 Tokens: {[name, ein_mge, aus_mge, bg_rez_nr]}")
+                # Saubere Namensbereinigung
+                name_cleaned = name_raw
+                name_cleaned = re.sub(r"\b[NZJT]\d{6}\b", "", name_cleaned)  # Arztnummern
+                name_cleaned = re.sub(r"\b[KREWUV]\d{6,8}\b", "", name_cleaned)  # weitere Codes (z.B. K241001)
+                name_cleaned = re.sub(r"\bDr\.?\b|\bProf\.?\b|\bArzt\b.*", "", name_cleaned, flags=re.IGNORECASE)
+                name_cleaned = re.sub(r"(Zentrum|Praxis|Unbekannt.*)", "", name_cleaned, flags=re.IGNORECASE)
+                name_cleaned = re.sub(r"\s+", " ", name_cleaned).strip()
 
-            row_dict = {
-                "lfdnr": lfdnr,
-                "datum": datum,
-                "name": name,
-                "ein_mge": ein_mge,
-                "aus_mge": aus_mge,
-                "bg_rez_nr": bg_rez_nr if layout == "a" else ""
-            }
+                name_parts = name_cleaned.split()
+                vorname = name_parts[0] if len(name_parts) > 1 else ""
+                nachname = " ".join(name_parts[1:]) if len(name_parts) > 1 else name_parts[0] if name_parts else ""
+                name = nachname if vorname else name_cleaned
 
-            all_rows.append((row_dict, meta, layout, dirty))
+                name_normalized = normalize(name_cleaned)
+                lieferant = name_cleaned if normalize(name_cleaned) in {normalize(l) for l in lieferanten_set} else ""
 
-    log_import(f"✅ Gesamt extrahierte Zeilen: {len(all_rows)}")
+                bg_rez_nr = ""
+                bewegung_tokens = tokens[-5:] if layout == "a" else tokens[-4:]
+                ein_mge, aus_mge, bg_rez_nr, dirty = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
+                if layout == "a" and len(bewegung_tokens) >= 4:
+                    candidate = bewegung_tokens[-2]
+                    if candidate.isdigit() and len(candidate) == 8:
+                        bg_rez_nr = candidate
+
+                row_dict = {
+                    "lfdnr": lfdnr,
+                    "datum": datum,
+                    "name": name,
+                    "vorname": vorname,
+                    "lieferant": lieferant,
+                    "ein_mge": ein_mge,
+                    "aus_mge": aus_mge,
+                    "bg_rez_nr": bg_rez_nr,
+                    "artikel_bezeichnung": artikel_bezeichnung,
+                    "belegnummer": belegnummer,
+                    "tokens": tokens,
+                    "liste": layout,
+                    "dirty": 1 if dirty else 0,
+                    "quelle": "pdf"
+                }
+
+                all_rows.append((row_dict, {
+                    "artikel_bezeichnung": artikel_bezeichnung,
+                    "belegnummer": belegnummer,
+                    "packungsgroesse": packungsgroesse
+                }, layout, dirty))
+
     return all_rows
 
 def parse_pdf_to_dataframe_dynamic_layout(rows_with_meta):
-    if not Path(LIEFERANTEN_PATH).exists():
-        raise FileNotFoundError("Lieferantenliste nicht gefunden")
-    lieferanten_df = pd.read_csv(LIEFERANTEN_PATH)
-
-    # Lieferantentokens extrahieren
-    lieferanten_set = set()
-    for val in lieferanten_df.iloc[:, 0].dropna():
-        for token in str(val).split():
-            lieferanten_set.add(normalize(token))
-
-    # Whitelist laden
-    whitelist_set = set()
-    if Path(WHITELIST_PATH).exists():
-        whitelist_df = pd.read_csv(WHITELIST_PATH)
-        whitelist_set = set(normalize(w) for w in whitelist_df.iloc[:, 0])
-
     parsed_rows = []
-    seen_keys = set()
 
-    for row_dict, meta, layout, dirty in rows_with_meta:
-        key = (row_dict["lfdnr"], row_dict["datum"])
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
+    for row_dict, meta, layout, dirty_reason in rows_with_meta:
+        tokens_raw = row_dict["tokens"]
+        artikel_bezeichnung = meta.get("artikel_bezeichnung", "Unbekannt")
+        belegnummer = meta.get("belegnummer", "Unbekannt")
+        packungsgroesse = meta.get("packungsgroesse", 0)
 
-        # Name & BG RezNr bereinigen
-        raw_name = row_dict.get("name", "")
-        name_tokens = raw_name.split()
-        name = raw_name
-        bg_rez_nr = row_dict.get("bg_rez_nr", "")
-        name, bg_rez_nr = clean_name_and_bg_rez_nr(name, bg_rez_nr)
+        # Bewegungstokens = letzte 5/4 Slots
+        movement_slots = 5 if layout == "a" else 4
+        bewegung_tokens = tokens_raw[-movement_slots:]
 
-        name_norm = normalize(name)
-        token_set = set(normalize(tok) for tok in name_tokens)
+        # Ein/Aus-Mengen & BG Rez.Nr. extrahieren
+        ein_mge, aus_mge, bg_rez_nr, dirty_bewegung = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
 
-        # Lieferant erkennen
-        lieferant = ""
-        match_tokens = lieferanten_set & token_set
-        for token in name_tokens:
-            norm_tok = normalize(token)
-            if norm_tok in match_tokens and norm_tok != "dr":
-                lieferant = token  # Original-Schreibweise übernehmen
-                break
+        # Name & Bewegung nochmals prüfen
+        name, bewegungstokens, dirty_name = split_name_and_bewegung(tokens_raw, layout)
 
-        # Kundenname bereinigen
-        if lieferant:
-            name = ""
-        elif not any(w in name_norm for w in whitelist_set):
-            # Entferne z. B. „25927 Giorgio Bellina T123456“ ⇒ „Giorgio Bellina“
-            name_clean = re.split(r"\sK\d{6,}|\s[A-Z]\d{6,}", raw_name)[0].strip()
-            name_clean = re.sub(r"^\d+\s+", "", name_clean)  # Entfernt führende Kundennummern jeder Länge
-            name_clean = re.sub(r"\b\d{1,3}\b", "", name_clean).strip()
-            name = re.sub(r"\s+", " ", name_clean)
+        dirty = dirty_reason or dirty_bewegung or dirty_name
 
-            # Bewegungstoken interpretieren
-            tokens = [
-                str(row_dict.get("ein_mge", "")).strip(),
-                str(row_dict.get("aus_mge", "")).strip(),
-                "0",  # neutraler Platzhalter statt -3
-                str(row_dict.get("bg_rez_nr", "")).strip()
-            ]
-
-            if any(t.startswith("Gesamt") for t in tokens):
-                log_import(f"⛔ Footer-Zeile erkannt: {tokens}", level="debug")  # statt immer log_import()
-
-            else:
-                log_import(f"🔍 Tokens: {tokens}", level="debug")
-
-                ein_raw, aus_raw, lager_raw, bg_token = tokens[-4:]
-
-                try:
-                    ein_val = int(ein_raw) if ein_raw.isdigit() else None
-                    aus_val = int(aus_raw) if aus_raw.isdigit() else None
-                except ValueError:
-                    ein_val = aus_val = None
-
-                # Bewegung interpretieren
-                if ein_val and not aus_val:
-                    log_import(f"🟢 Eingang erkannt: {ein_val}", level="debug")
-                elif aus_val and not ein_val:
-                   log_import(f"🔴 Ausgang erkannt: {aus_val}", level="debug")
-                elif not ein_val and not aus_val:
-                    log_import(f"⚪ Keine Bewegung erkannt. Möglicherweise Lager oder nur BG-Nr.: {bg_token}", level="debug")
-                else:
-                    log_import(f"⚠️ Ungültige Kombination: Ein={ein_raw}, Aus={aus_raw}, BG={bg_token}", level="debug")
-            log_import(f"💬 Vor detect_bewegung: Tokens={tokens}")
-
-            ein_mge = safe_int(row_dict.get("ein_mge"))
-            aus_mge = safe_int(row_dict.get("aus_mge"))
-
-            log_import(f"📦 Bewegung übernommen: Ein={ein_mge}, Aus={aus_mge}, dirty={dirty}", level="debug")
-
-            ein_pack = aus_pack = 0
-            if ein_mge:
-                ein_pack = meta.get("packungsgroesse") or 1
-            if aus_mge:
-                aus_pack = meta.get("packungsgroesse") or 1
-
-        # Zeile speichern
-        parsed_rows.append({
-            "lfdnr": row_dict["lfdnr"],
-            "datum": row_dict["datum"],
-            "name": name,
-            "lieferant": lieferant,
+        row_dict.update({
             "ein_mge": ein_mge,
             "aus_mge": aus_mge,
-            "ein_pack": ein_pack,
-            "aus_pack": aus_pack,
-            "bg_rez_nr": bg_rez_nr if re.fullmatch(r"\d+", str(bg_rez_nr).strip()) else "0",
-            "liste": layout,
-            "belegnummer": meta.get("belegnummer") or "Unbekannt",
-            "artikel_bezeichnung": meta.get("artikel_bezeichnung") or "Unbekannt",
-            "dirty": bool(dirty),
-            "quelle": "pdf"
+            "bg_rez_nr": bg_rez_nr,
+            "dirty": 1 if dirty else 0,
+            "dirty_reason": dirty,
+            "artikel_bezeichnung": artikel_bezeichnung,
+            "belegnummer": belegnummer,
+            "liste": layout
         })
 
-    return pd.DataFrame(parsed_rows)
+        parsed_rows.append(row_dict)
+
+    df = pd.DataFrame(parsed_rows)
+    return df
 
 def run_import(parsed_df):
     if not isinstance(parsed_df, pd.DataFrame):
@@ -349,13 +313,18 @@ def run_import(parsed_df):
         log_import("⚠️ Keine gültigen Zeilen zum Import.")
         return
 
-    # Falls fälschlich lfdnr mitkommt: raus damit
-    if "lfdnr" in parsed_df.columns:
-        parsed_df = parsed_df.drop(columns=["lfdnr"])
+    # Nur die Spalten übernehmen, die auch in der Datenbanktabelle existieren
+    allowed_cols = [
+        "datum", "name", "vorname", "lieferant",
+        "ein_mge", "aus_mge", "bg_rez_nr",
+        "artikel_bezeichnung", "belegnummer",
+        "dirty", "liste", "quelle"
+    ]
+
+    df_clean = parsed_df[[col for col in allowed_cols if col in parsed_df.columns]]
 
     with sqlite3.connect(DB_PATH) as conn:
-        parsed_df.to_sql("bewegungen", conn, if_exists="append", index=False)
-        log_import(f"✅ {len(parsed_df)} Zeilen erfolgreich in DB importiert.")
-
+        df_clean.to_sql("bewegungen", conn, if_exists="append", index=False)
+        log_import(f"✅ {len(df_clean)} Zeilen erfolgreich in DB importiert.")
 
 
