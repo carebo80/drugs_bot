@@ -37,4 +37,13 @@ def detect_bewegung(ein_raw: str, aus_raw: str, lieferant: str):
         return 0, aus, False
     return 0, 0, True
 
-log_import(f"📦 LIEFERANTEN: {LIEFERANTEN_PATH}")
+def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
+    name_clean = re.sub(r"\b[NJT]\d{6}\b", "", name).strip()
+    match = re.search(r"\b\d{8}\b", name_clean)
+    if match:
+        bg_rez_nr = match.group(0)
+        name_clean = name_clean.replace(bg_rez_nr, "").strip()
+    name_clean = re.sub(r"^\d+\s+", "", name_clean)
+    name_clean = re.sub(r"\b\d{1,3}\b", "", name_clean).strip()
+    name_clean = re.sub(r"\s+", " ", name_clean)
+    return name_clean, bg_rez_nr
