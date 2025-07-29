@@ -46,12 +46,25 @@ def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
     name_clean = re.sub(r"\b\d{1,3}\b", "", name_clean).strip()
     name_clean = re.sub(r"\s+", " ", name_clean)
     return name_clean, bg_rez_nr
-
-def slot_preserving_tokenizer_fixed(line: str) -> list[str]:
+def slot_preserving_tokenizer_fixed(line: str, layout: str) -> list[str]:
+    """
+    Trennt eine Zeile anhand von echten Slots via '\n', behält Leerfelder.
+    Beispiel: '27014\\n08.04.2025\\n7514\\nKurt Schuepbach\\nJ725501\\nKantonsspital Winterthur\\n \\n \\n1\\n1\\n10204558'
+    → ['27014', '08.04.2025', '7514', 'Kurt Schuepbach', 'J725501', 'Kantonsspital Winterthur', '', '', '1', '1', '10204558']
+    """
     log_import(f"\n🔍 Input-Zeile: {repr(line)}")
+
     if line.strip().lower().startswith("gesamt"):
         return []
-    tokens = re.split(r'(\s+)', line)
+
+    # Trennen nach \n, Strip pro Feld
+    tokens = [t.strip() for t in line.split("\n")]
+
+    # Layout-abhängige Mindestlänge sicherstellen
+    expected_len = 12 if layout == "a" else 11
+    if len(tokens) < expected_len:
+        tokens += [""] * (expected_len - len(tokens))
+
     log_import(f"🎉 Tokens RAW: {tokens} (Anzahl: {len(tokens)})")
     return tokens
 

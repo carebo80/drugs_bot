@@ -1,8 +1,8 @@
-# utils/extractor.py
+# utils/extractor.py (komplett mit Slotstruktur – stabiler Import)
 import csv
 import fitz
 import re
-from utils.helpers import normalize, detect_bewegung_from_structured_tokens, extract_article_info
+from utils.helpers import normalize, detect_bewegung_from_structured_tokens, extract_article_info, slot_preserving_tokenizer_fixed
 from utils.logger import log_import
 
 def extract_table_rows_with_article(pdf_path: str):
@@ -23,6 +23,7 @@ def extract_table_rows_with_article(pdf_path: str):
     for page in doc:
         text = page.get_text("text")
         layout = "a" if "BG Rez.Nr." in text else "b"
+        anzahl = 5 if layout == "a" else 4
 
         # Artikelzeile extrahieren
         artikel_bezeichnung, belegnummer, packungsgroesse = "", "", 1
@@ -38,59 +39,67 @@ def extract_table_rows_with_article(pdf_path: str):
 
         for block in page.get_text("blocks"):
             block_text = block[4].strip()
-            rows = re.split(r"(?=\d{5,}\s+\d{2}\.\d{2}\.\d{4})", block_text.replace("\n", " "))
+            rows = re.split(r"(?=\d{5,}\s+\d{2}\.\d{2}\.\d{4})", block_text)
             for zeile in rows:
                 zeile = zeile.strip()
                 if not re.match(r"^\d{5,}\s+\d{2}\.\d{2}\.\d{4}", zeile):
                     continue
 
-                anzahl = 5 if layout == "a" else 4
-                bewegung_tokens = zeile.split()[-anzahl:]
-                bewegungsteil = " ".join(bewegung_tokens)
-                kopfteil = zeile[:zeile.rfind(bewegungsteil)].strip()
-                tokens = kopfteil.split() + bewegung_tokens
-
-                if len(tokens) < 6:
+                tokens = slot_preserving_tokenizer_fixed(zeile, layout)
+                if not tokens or len(tokens) < (3 + anzahl):
                     continue
 
-                lfdnr, datum = tokens[0], tokens[1]
-                kundennr = tokens[2] if tokens[2].isdigit() else ""
+                bewegung_tokens = tokens[-anzahl:]
+                kopf_tokens = tokens[:-anzahl]
+                if len(kopf_tokens) < 3:
+                    continue
 
-                name_tokens = tokens[3:-anzahl]
-                name_raw = " ".join(name_tokens)
+                lfdnr, datum = kopf_tokens[0], kopf_tokens[1]
+                kundennr = kopf_tokens[2] if kopf_tokens[2].isdigit() else ""
 
-                # Name bereinigen
-                name_cleaned = re.sub(r"\b[NZJT]\d{6}\b", "", name_raw)
-                name_cleaned = re.sub(r"\b[KREWUV]\d{6,8}\b", "", name_cleaned)
-                name_cleaned = re.sub(r"\bDr\.?\b|\bProf\.?\b|\bArzt\b.*", "", name_cleaned, flags=re.IGNORECASE)
-                name_cleaned = re.sub(r"(Zentrum|Praxis|Unbekannt.*|TUCARE|CLINICUM|KLINIK.*|SPITAL.*)", "", name_cleaned, flags=re.IGNORECASE)
-                name_cleaned = re.sub(r"\s+", " ", name_cleaned).strip()
+                name_tokens = kopf_tokens[3:]
+                name_cleaned = []
+                arzt_trigger = ["DR.", "PROF.", "ARZT", "ÄRZTIN", "ZENTRUM", "PRAXIS", "SPITAL", "KLINIK", "TUCARE", "CLINICUM", "UNBEKANNT"]
+                for token in name_tokens:
+                    if re.match(r"^[A-Z]\d{6,}$", token):  # Arztnummer
+                        break
+                    if token.upper() in arzt_trigger:
+                        break
+                    name_cleaned.append(token)
 
-                name_parts = name_cleaned.split()
+                name_cleaned_str = " ".join(name_cleaned)
+                name_parts = name_cleaned_str.split()
                 vorname = name_parts[0] if len(name_parts) > 1 else ""
                 nachname = name_parts[1] if len(name_parts) > 1 else (name_parts[0] if name_parts else "")
-                name = nachname if vorname else name_cleaned
+                name = nachname if vorname else name_cleaned_str
 
-                normalized_name = normalize(name_cleaned)
+                # Lieferantenerkennung
                 lieferant = ""
+                normalized = normalize(name_cleaned_str)
                 for l in lieferanten_set:
-                    if normalize(l) in normalized_name:
+                    if normalize(l) in normalized:
                         lieferant = l
+                        name = ""
+                        vorname = ""
                         break
 
-                bg_rez_nr = ""
-                dirty = False
-                ein_mge, aus_mge, *_ = detect_bewegung_from_structured_tokens(tokens[-anzahl:], layout)
+                # Bewegung erkennen
+                try:
+                    ein_mge, aus_mge, *_ = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
+                    dirty = False
+                except Exception as e:
+                    log_import(f"❌ Fehler Bewegung: {bewegung_tokens} → {e}")
+                    ein_mge, aus_mge = 0, 0
+                    dirty = True
 
-                if layout == "a" and len(tokens) >= 5:
-                    candidate = tokens[-2]
+                # bg_rez_nr extrahieren bei Layout A
+                bg_rez_nr = ""
+                if layout == "a" and len(bewegung_tokens) >= 2:
+                    candidate = bewegung_tokens[-2]
                     if candidate.isdigit() and len(candidate) == 8:
                         bg_rez_nr = candidate
 
-                if ein_mge == 0 and aus_mge == 0:
-                    dirty = True
-
-                log_import(f"🧪 Bewegungstokens: {tokens[-anzahl:]}")
+                log_import(f"🧪 Bewegungstokens: {bewegung_tokens}")
                 log_import(f"🔎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
                 log_import(f"📦 Tokens: {tokens}")
 
