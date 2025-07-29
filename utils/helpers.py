@@ -48,7 +48,7 @@ def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
     return name_clean, bg_rez_nr
 def slot_preserving_tokenizer_fixed(line: str, layout: str) -> list[str]:
     """
-    Trennt eine Zeile anhand von echten Slots via '\n', behält Leerfelder.
+    Trennt eine Zeile anhand von sichtbaren Slots via '\n', behält auch leere Felder.
     Beispiel: '27014\\n08.04.2025\\n7514\\nKurt Schuepbach\\nJ725501\\nKantonsspital Winterthur\\n \\n \\n1\\n1\\n10204558'
     → ['27014', '08.04.2025', '7514', 'Kurt Schuepbach', 'J725501', 'Kantonsspital Winterthur', '', '', '1', '1', '10204558']
     """
@@ -57,10 +57,11 @@ def slot_preserving_tokenizer_fixed(line: str, layout: str) -> list[str]:
     if line.strip().lower().startswith("gesamt"):
         return []
 
-    # Trennen nach \n, Strip pro Feld
-    tokens = [t.strip() for t in line.split("\n")]
+    # Split nach '\n' OHNE leere Slots zu verlieren
+    raw_tokens = line.split("\n")
+    tokens = [t.strip() if t.strip() else "" for t in raw_tokens]
 
-    # Layout-abhängige Mindestlänge sicherstellen
+    # Layout-abhängige Mindestlänge ergänzen
     expected_len = 12 if layout == "a" else 11
     if len(tokens) < expected_len:
         tokens += [""] * (expected_len - len(tokens))
@@ -119,45 +120,39 @@ def extract_article_info(line: str) -> dict:
 def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str):
     """
     Erwartet:
-    - Layout A: [..., ein, aus, lager, bg_rez_nr, abh]
+    - Layout A: [..., ein, aus, lager, bg_rez_nr, abh] (letzter Slot leer)
     - Layout B: [..., ein, aus, lager, abh]
     """
-
     ein_mge = aus_mge = 0
     bg_rez_nr = ""
     dirty = False
 
+    log_import(f"🧪 Bewegungstokens: {tokens[-6:]}")
+
     try:
-        if layout == "a" and len(tokens) >= 5:
+        if layout == "a" and len(tokens) >= 12:
             ein_raw = tokens[-5]
             aus_raw = tokens[-4]
             bg_rez_candidate = tokens[-2]
-
-        elif layout == "b" and len(tokens) >= 4:
+        elif layout == "b" and len(tokens) >= 11:
             ein_raw = tokens[-4]
             aus_raw = tokens[-3]
             bg_rez_candidate = ""
-
         else:
-            return 0, 0, "", True  # nicht genug Tokens → dirty
+            log_import("❌ Zu wenig Tokens für Layout.")
+            return 0, 0, "", True
 
-        # Prüfe und konvertiere Ein/Aus-Werte
         ein_mge = int(ein_raw) if ein_raw.strip().isdigit() else 0
         aus_mge = int(aus_raw) if aus_raw.strip().isdigit() else 0
 
-        # bg_rez_nr: Nur bei Layout A und nur wenn 8-stellig numerisch
         if layout == "a" and re.fullmatch(r"\d{8}", bg_rez_candidate):
             bg_rez_nr = bg_rez_candidate
 
-        # Validierungslogik:
-        # - nur einer von beiden (ein/aus) darf > 0 sein
-        # - beide 0 oder beide > 0 → dirty
         if (ein_mge > 0 and aus_mge > 0) or (ein_mge == 0 and aus_mge == 0):
             dirty = True
 
-    except Exception:
+    except Exception as e:
+        log_import(f"❌ Fehler bei Bewegungserkennung: {e}")
         dirty = True
-        ein_mge = aus_mge = 0
-        bg_rez_nr = ""
 
     return ein_mge, aus_mge, bg_rez_nr, dirty

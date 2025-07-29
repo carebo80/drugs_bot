@@ -83,21 +83,14 @@ def extract_table_rows_with_article(pdf_path: str):
                         vorname = ""
                         break
 
-                # Bewegung erkennen
+                # Bewegung und BG-Rez-Nr erkennen
                 try:
-                    ein_mge, aus_mge, *_ = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
-                    dirty = False
+                    ein_mge, aus_mge, bg_rez_nr, dirty = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
                 except Exception as e:
                     log_import(f"❌ Fehler Bewegung: {bewegung_tokens} → {e}")
-                    ein_mge, aus_mge = 0, 0
+                    ein_mge, aus_mge, bg_rez_nr = 0, 0, ""
                     dirty = True
 
-                # bg_rez_nr extrahieren bei Layout A
-                bg_rez_nr = ""
-                if layout == "a" and len(bewegung_tokens) >= 2:
-                    candidate = bewegung_tokens[-2]
-                    if candidate.isdigit() and len(candidate) == 8:
-                        bg_rez_nr = candidate
 
                 log_import(f"🧪 Bewegungstokens: {bewegung_tokens}")
                 log_import(f"🔎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
