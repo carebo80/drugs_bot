@@ -34,6 +34,8 @@ def detect_bewegung(ein_raw: str, aus_raw: str, lieferant: str):
         return ein, 0, False
     if aus and not ein:
         return 0, aus, False
+    log_import(f"🔎 erkannte Bewegung: Ein: {ein}, Aus: {aus}")
+
     return 0, 0, True
 
 def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
@@ -47,27 +49,22 @@ def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
     name_clean = re.sub(r"\s+", " ", name_clean)
     return name_clean, bg_rez_nr
 def slot_preserving_tokenizer_fixed(line: str, layout: str) -> list[str]:
-    """
-    Trennt eine Zeile anhand von sichtbaren Slots via '\n', behält auch leere Felder.
-    Beispiel: '27014\\n08.04.2025\\n7514\\nKurt Schuepbach\\nJ725501\\nKantonsspital Winterthur\\n \\n \\n1\\n1\\n10204558'
-    → ['27014', '08.04.2025', '7514', 'Kurt Schuepbach', 'J725501', 'Kantonsspital Winterthur', '', '', '1', '1', '10204558']
-    """
     log_import(f"\n🔍 Input-Zeile: {repr(line)}")
 
     if line.strip().lower().startswith("gesamt"):
         return []
 
-    # Split nach '\n' OHNE leere Slots zu verlieren
-    raw_tokens = line.split("\n")
-    tokens = [t.strip() if t.strip() else "" for t in raw_tokens]
+    tokens = [t.strip() for t in line.split("\n")]
 
-    # Layout-abhängige Mindestlänge ergänzen
     expected_len = 12 if layout == "a" else 11
     if len(tokens) < expected_len:
         tokens += [""] * (expected_len - len(tokens))
+    elif len(tokens) > expected_len:
+        tokens = tokens[:expected_len]
 
     log_import(f"🎉 Tokens RAW: {tokens} (Anzahl: {len(tokens)})")
     return tokens
+
 
 def split_multiple_rows(text):
     zeilen = []
@@ -118,41 +115,39 @@ def extract_article_info(line: str) -> dict:
     }
 
 def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str):
-    """
-    Erwartet:
-    - Layout A: [..., ein, aus, lager, bg_rez_nr, abh] (letzter Slot leer)
-    - Layout B: [..., ein, aus, lager, abh]
-    """
-    ein_mge = aus_mge = 0
-    bg_rez_nr = ""
-    dirty = False
-
-    log_import(f"🧪 Bewegungstokens: {tokens[-6:]}")
-
+    log_import(f"🔬 Tokens in detect_bewegung: {tokens}")
     try:
-        if layout == "a" and len(tokens) >= 12:
-            ein_raw = tokens[-5]
-            aus_raw = tokens[-4]
-            bg_rez_candidate = tokens[-2]
-        elif layout == "b" and len(tokens) >= 11:
-            ein_raw = tokens[-4]
-            aus_raw = tokens[-3]
-            bg_rez_candidate = ""
-        else:
-            log_import("❌ Zu wenig Tokens für Layout.")
-            return 0, 0, "", True
+        if layout == "a" and len(tokens) != 5:
+            raise ValueError(f"Layout A erwartet 5 Tokens, erhalten: {len(tokens)}")
+        if layout == "b" and len(tokens) != 4:
+            raise ValueError(f"Layout B erwartet 4 Tokens, erhalten: {len(tokens)}")
 
-        ein_mge = int(ein_raw) if ein_raw.strip().isdigit() else 0
-        aus_mge = int(aus_raw) if aus_raw.strip().isdigit() else 0
+        ein_str = tokens[0].strip()
+        aus_str = tokens[1].strip()
+        lager_str = tokens[2].strip()
 
-        if layout == "a" and re.fullmatch(r"\d{8}", bg_rez_candidate):
-            bg_rez_nr = bg_rez_candidate
+        ein_mge = int(ein_str) if ein_str.isdigit() else 0
+        aus_mge = int(aus_str) if aus_str.isdigit() else 0
+        lager = int(lager_str) if lager_str.lstrip("-").isdigit() else 0
 
+        dirty = False
         if (ein_mge > 0 and aus_mge > 0) or (ein_mge == 0 and aus_mge == 0):
             dirty = True
+        if lager < 0:
+            dirty = True
+
+        bg_rez_nr = ""
+        if layout == "a":
+            bg_rez_candidate = tokens[3].strip()
+            if re.fullmatch(r"\d{7,}", bg_rez_candidate):
+                bg_rez_nr = bg_rez_candidate
+            elif bg_rez_candidate == "0":
+                bg_rez_nr = "0"  # explizit erlauben
+            else:
+                bg_rez_nr = ""
+
+        return ein_mge, aus_mge, bg_rez_nr, dirty
 
     except Exception as e:
-        log_import(f"❌ Fehler bei Bewegungserkennung: {e}")
-        dirty = True
-
-    return ein_mge, aus_mge, bg_rez_nr, dirty
+        log_import(f"❌ Fehler Bewegungstokens: {tokens} → {e}")
+        return 0, 0, "", True

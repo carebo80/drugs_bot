@@ -1,4 +1,4 @@
-# utils/extractor.py (komplett mit Slotstruktur – stabiler Import)
+# utils/extractor.py
 import csv
 import fitz
 import re
@@ -23,7 +23,8 @@ def extract_table_rows_with_article(pdf_path: str):
     for page in doc:
         text = page.get_text("text")
         layout = "a" if "BG Rez.Nr." in text else "b"
-        anzahl = 5 if layout == "a" else 4
+        expected_slots = 12 if layout == "a" else 11
+        bewegungs_slots = 5 if layout == "a" else 4
 
         # Artikelzeile extrahieren
         artikel_bezeichnung, belegnummer, packungsgroesse = "", "", 1
@@ -46,11 +47,19 @@ def extract_table_rows_with_article(pdf_path: str):
                     continue
 
                 tokens = slot_preserving_tokenizer_fixed(zeile, layout)
-                if not tokens or len(tokens) < (3 + anzahl):
+
+                if not tokens:
                     continue
 
-                bewegung_tokens = tokens[-anzahl:]
-                kopf_tokens = tokens[:-anzahl]
+                # ⛑️ Tokens auffüllen
+                if len(tokens) < expected_slots:
+                    tokens += [""] * (expected_slots - len(tokens))
+                elif len(tokens) > expected_slots:
+                    log_import(f"⚠️ Zu viele Tokens ({len(tokens)}) in Layout {layout}: {tokens}")
+                    continue
+
+                bewegung_tokens = tokens[-bewegungs_slots:]
+                kopf_tokens = tokens[:-bewegungs_slots]
                 if len(kopf_tokens) < 3:
                     continue
 
@@ -90,7 +99,6 @@ def extract_table_rows_with_article(pdf_path: str):
                     log_import(f"❌ Fehler Bewegung: {bewegung_tokens} → {e}")
                     ein_mge, aus_mge, bg_rez_nr = 0, 0, ""
                     dirty = True
-
 
                 log_import(f"🧪 Bewegungstokens: {bewegung_tokens}")
                 log_import(f"🔎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
