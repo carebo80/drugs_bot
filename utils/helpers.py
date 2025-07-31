@@ -8,9 +8,6 @@ import os
 def get_env_var(key: str) -> str:
     return os.getenv(key, "")
 
-from utils.env import get_env_var
-import csv
-
 def is_lieferant(name: str) -> bool:
     lieferanten_path = get_env_var("LIEFERANTEN_PATH")
     print(f"📦 LIEFERANTEN (helpers.py): {lieferanten_path}")  # Debug
@@ -37,6 +34,25 @@ def detect_bewegung(ein_raw: str, aus_raw: str, lieferant: str):
     log_import(f"🔎 erkannte Bewegung: Ein: {ein}, Aus: {aus}")
 
     return 0, 0, True
+
+def is_valid_bewegungsteil(tokens: list[str]) -> bool:
+    """Prüft, ob die letzten Tokens von Layout A valide für Bewegungserkennung sind."""
+    if len(tokens) != 5:
+        return False
+    try:
+        # Ein/Aus/Lager: numerisch oder leer
+        int(tokens[0]) if tokens[0] else None
+        int(tokens[1]) if tokens[1] else None
+        int(tokens[2]) if tokens[2] else None
+        # BG Rez.Nr.: entweder leer oder 8-stellige Zahl
+        if tokens[3] and not re.fullmatch(r"\d{8}", tokens[3]):
+            return False
+        # Abh: darf leer oder ein einzelnes Zeichen sein
+        if tokens[4] and len(tokens[4].strip()) > 1:
+            return False
+        return True
+    except Exception:
+        return False
 
 def clean_name_and_bg_rez_nr(name: str, bg_rez_nr: str) -> tuple[str, str]:
     name_clean = re.sub(r"\b[NJT]\d{6}\b", "", name).strip()

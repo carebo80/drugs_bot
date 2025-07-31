@@ -1,8 +1,7 @@
-# utils/extractor.py
 import csv
 import fitz
 import re
-from utils.helpers import normalize, detect_bewegung_from_structured_tokens, extract_article_info, slot_preserving_tokenizer_fixed
+from utils.helpers import normalize, detect_bewegung_from_structured_tokens, extract_article_info, slot_preserving_tokenizer_fixed, is_valid_bewegungsteil
 from utils.logger import log_import
 
 def extract_table_rows_with_article(pdf_path: str):
@@ -23,19 +22,17 @@ def extract_table_rows_with_article(pdf_path: str):
     for page in doc:
         text = page.get_text("text")
         layout = "a" if "BG Rez.Nr." in text else "b"
-        expected_slots = 12 if layout == "a" else 11
-        bewegungs_slots = 5 if layout == "a" else 4
 
         # Artikelzeile extrahieren
         artikel_bezeichnung, belegnummer, packungsgroesse = "", "", 1
         for line in text.splitlines():
             if re.search(r"(?i)^medikament:", line):
-                log_import(f"🧪 Zeile MEDI: {line}")
+                log_import(f"🥚 Zeile MEDI: {line}")
                 meta = extract_article_info(line)
                 artikel_bezeichnung = meta["artikel_bezeichnung"]
                 packungsgroesse = meta["packungsgroesse"]
                 belegnummer = meta["belegnummer"]
-                log_import(f"🧪 Artikel extrahiert: {artikel_bezeichnung}, PG: {packungsgroesse}, Beleg: {belegnummer}")
+                log_import(f"🥚 Artikel extrahiert: {artikel_bezeichnung}, PG: {packungsgroesse}, Beleg: {belegnummer}")
                 break
 
         for block in page.get_text("blocks"):
@@ -48,18 +45,35 @@ def extract_table_rows_with_article(pdf_path: str):
 
                 tokens = slot_preserving_tokenizer_fixed(zeile, layout)
 
-                if not tokens:
-                    continue
+                # Kein Token am Ende mehr entfernen – nur loggen
+                if tokens and tokens[-1].strip() == "":
+                    log_import(f"🥝 Letztes Token ist leer (nicht entfernt) → {tokens}")
 
-                # ⛑️ Tokens auffüllen
-                if len(tokens) < expected_slots:
-                    tokens += [""] * (expected_slots - len(tokens))
-                elif len(tokens) > expected_slots:
-                    log_import(f"⚠️ Zu viele Tokens ({len(tokens)}) in Layout {layout}: {tokens}")
-                    continue
+                bewegung_tokens = []
+                kopf_tokens = []
 
-                bewegung_tokens = tokens[-bewegungs_slots:]
-                kopf_tokens = tokens[:-bewegungs_slots]
+                if layout == "a":
+                    gefunden = False
+                    for i in range(0, 3):  # Versuche von hinten -5, -6, -7
+                        bewegungsteil_kandidat = tokens[-(5 + i):-i if i > 0 else None]
+                        if is_valid_bewegungsteil(bewegungsteil_kandidat):
+                            bewegung_tokens = bewegungsteil_kandidat
+                            kopf_tokens = tokens[:-(5 + i)]
+                            gefunden = True
+                            log_import(f"✅ Bewegungsteil gefunden (Layout A, Offset {i}): {bewegung_tokens}")
+                            break
+                    if not gefunden:
+                        log_import(f"⚠️ Keine gültige Bewegungsteil-Struktur gefunden (Layout A): {tokens}")
+                        continue
+
+                elif layout == "b":
+                    if len(tokens) < 11:
+                        log_import(f"⚠️ Ungültige Tokenanzahl für Layout B: {len(tokens)}")
+                        continue
+                    bewegung_tokens = tokens[-4:]
+                    kopf_tokens = tokens[:-4]
+
+
                 if len(kopf_tokens) < 3:
                     continue
 
@@ -70,7 +84,7 @@ def extract_table_rows_with_article(pdf_path: str):
                 name_cleaned = []
                 arzt_trigger = ["DR.", "PROF.", "ARZT", "ÄRZTIN", "ZENTRUM", "PRAXIS", "SPITAL", "KLINIK", "TUCARE", "CLINICUM", "UNBEKANNT"]
                 for token in name_tokens:
-                    if re.match(r"^[A-Z]\d{6,}$", token):  # Arztnummer
+                    if re.match(r"^[A-Z]\d{6,}$", token):
                         break
                     if token.upper() in arzt_trigger:
                         break
@@ -92,7 +106,6 @@ def extract_table_rows_with_article(pdf_path: str):
                         vorname = ""
                         break
 
-                # Bewegung und BG-Rez-Nr erkennen
                 try:
                     ein_mge, aus_mge, bg_rez_nr, dirty = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
                 except Exception as e:
@@ -100,8 +113,8 @@ def extract_table_rows_with_article(pdf_path: str):
                     ein_mge, aus_mge, bg_rez_nr = 0, 0, ""
                     dirty = True
 
-                log_import(f"🧪 Bewegungstokens: {bewegung_tokens}")
-                log_import(f"🔎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
+                log_import(f"🥚 Bewegungstokens: {bewegung_tokens}")
+                log_import(f"🕎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
                 log_import(f"📦 Tokens: {tokens}")
 
                 row_dict = {
