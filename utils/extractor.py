@@ -34,12 +34,10 @@ def extract_table_rows_with_article(pdf_path: str):
         artikel_bezeichnung, belegnummer, packungsgroesse = "", "", 1
         for line in text.splitlines():
             if re.search(r"(?i)^medikament:", line):
-                log_import(f"🥚 Zeile MEDI: {line}")
                 meta = extract_article_info(line)
                 artikel_bezeichnung = meta["artikel_bezeichnung"]
                 belegnummer = meta["belegnummer"]
                 packungsgroesse = meta["packungsgroesse"]
-                log_import(f"🥚 Artikel extrahiert: {artikel_bezeichnung}, PG: {packungsgroesse}, Beleg: {belegnummer}")
                 break
 
         for block in page.get_text("blocks"):
@@ -53,61 +51,55 @@ def extract_table_rows_with_article(pdf_path: str):
                 tokens_raw = slot_preserving_tokenizer_fixed(zeile, layout)
                 tokens = clean_tokens_layout_a(tokens_raw) if layout == "a" else clean_trailing_empty_tokens(tokens_raw, 11)
 
-                if tokens_raw != tokens:
-                    log_import(f"🧼 Token cleanup: {tokens_raw} → {tokens}")
-
                 if len(tokens) < 2:
                     continue
 
                 if layout == "a":
-                    if len(tokens) < 10:
-                        log_import(f"⚠️ Zu wenige Tokens für Layout A: {len(tokens)}")
+                    # Ab letzter Stelle rückwärts: so lange leere Tokens entfernen, bis bg_rez_nr erkennbar ist
+                    tokens_cleaned = list(tokens)
+                    while tokens_cleaned and tokens_cleaned[-1] == "":
+                        tokens_cleaned.pop()
+
+                    if len(tokens_cleaned) < 4:
+                        log_import(f"❌ Zu wenige Tokens für Layout A nach Bereinigung: {tokens_cleaned}")
                         continue
 
-                    bewegung_tokens = tokens[-5:]  # IMMER 5 letzte Tokens
-                    kopf_tokens = tokens[:-5]
-                else:  # Layout B
-                    if len(tokens) < 9:
-                        log_import(f"⚠️ Zu wenige Tokens für Layout B: {len(tokens)}")
-                        continue
+                    bewegung_tokens = tokens_cleaned[-4:]  # ['ein', 'aus', 'lager', 'bg_rez_nr']
+                    kopf_tokens = tokens[:len(tokens_cleaned) - 4]
 
-                    bewegung_tokens = tokens[-4:]  # IMMER 4 letzte Tokens
+                else:
+                    bewegung_tokens = tokens[-4:]  # ['ein', 'aus', 'lager', '']
                     kopf_tokens = tokens[:-4]
 
-                # Basisdaten extrahieren
+                # Basisdaten
                 lfdnr = kopf_tokens[0] if len(kopf_tokens) > 0 else ""
                 datum = kopf_tokens[1] if len(kopf_tokens) > 1 else ""
-
-                # Lieferanten-Logik
                 kundennr = kopf_tokens[2] if len(kopf_tokens) > 2 and kopf_tokens[2].isdigit() else ""
-                lieferant_kandidat = kopf_tokens[2] if not kundennr else ""
-                name_tokens = kopf_tokens[3:] if kundennr else kopf_tokens[3:] if len(kopf_tokens) > 3 else []
 
-                name_cleaned = []
-                for token in name_tokens:
-                    if re.match(r"^[A-Z]\d{6,}$", token): break
-                    if re.search(r"(DR\.?|PROF\.?|SPITAL|KLINIK|PRAXIS|ZENTRUM|TUCARE|UNBEKANNT)", token.upper()): break
-                    name_cleaned.append(token)
-
-                name_cleaned_str = " ".join(name_cleaned).strip()
-                normalized = normalize(name_cleaned_str)
                 lieferant = ""
-                name = ""
-                vorname = ""
+                for idx, token in enumerate(kopf_tokens):
+                    log_import(f"🔍 Kopf-Token {idx}: '{token}' | Normalisiert: '{normalize(token)}'")
+                    if normalize(token) in {normalize(l) for l in lieferanten_set}:
+                        lieferant = token.strip()
+                        log_import(f"✅ MATCH mit Lieferant: '{lieferant}'")
+                        break
 
-                if normalize(lieferant_kandidat) in {normalize(l) for l in lieferanten_set}:
-                    lieferant = lieferant_kandidat.strip()
-                else:
-                    for l in lieferanten_set:
-                        if normalize(l) in normalized:
-                            lieferant = l
-                            break
-
+                # 🧠 Namensfelder nur extrahieren wenn kein Lieferant
+                name, vorname = "", ""
                 if not lieferant:
+                    name_tokens = kopf_tokens[3:] if kundennr else kopf_tokens[2:]
+                    name_cleaned = []
+                    for token in name_tokens:
+                        if re.match(r"^[A-Z]\d{6,}$", token):  # Arztnummer z. B. Z031031
+                            break
+                        name_cleaned.append(token)
+                    name_cleaned_str = " ".join(name_cleaned).strip()
                     name_parts = name_cleaned_str.split()
                     vorname = name_parts[0] if len(name_parts) > 1 else ""
                     nachname = name_parts[1] if len(name_parts) > 1 else (name_parts[0] if name_parts else "")
                     name = nachname if vorname else name_cleaned_str
+
+                log_import(f"✅ Erkannt als Lieferant: '{lieferant}'") if lieferant else log_import(f"❌ Kein Lieferant erkannt. Name: '{name}'")
 
                 # Bewegung erkennen
                 try:
@@ -118,9 +110,8 @@ def extract_table_rows_with_article(pdf_path: str):
                     log_import(f"❌ Fehler Bewegung: {bewegung_tokens} → {e}")
                     ein_mge, aus_mge, bg_rez_nr, dirty = 0, 0, "", True
 
-                log_import(f"🥚 Bewegungstokens: {bewegung_tokens}")
-                log_import(f"🕎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
-                log_import(f"📦 Tokens: {tokens}")
+                ein_pack = packungsgroesse if ein_mge > 0 else 0
+                aus_pack = packungsgroesse if aus_mge > 0 else 0
 
                 row_dict = {
                     "lfdnr": lfdnr,
@@ -130,6 +121,8 @@ def extract_table_rows_with_article(pdf_path: str):
                     "lieferant": lieferant,
                     "ein_mge": ein_mge,
                     "aus_mge": aus_mge,
+                    "ein_pack": ein_pack,
+                    "aus_pack": aus_pack,
                     "bg_rez_nr": bg_rez_nr,
                     "artikel_bezeichnung": artikel_bezeichnung,
                     "belegnummer": belegnummer,
