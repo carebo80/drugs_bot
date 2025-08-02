@@ -151,12 +151,14 @@ def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str, is_li
             return 0, 0, "", True
         bewegung = tokens_cleaned[-4:]  # ['ein', 'aus', 'lager', 'bg_rez_nr']
         ein_raw, aus_raw, _, bg_rez_nr_raw = bewegung
+        
     else:  # layout == "b"
         if len(tokens_cleaned) < 3:
             return 0, 0, "", True
         bewegung = tokens_cleaned[-3:]  # ['ein', 'aus', 'bg_rez_nr']
-        ein_raw, aus_raw, bg_rez_nr_raw = bewegung
-
+        ein_raw, aus_raw, _ = bewegung
+        bg_rez_nr_raw = ""
+        
     # Bewegung für Lieferanten (immer 'ein')
     if is_lieferant:
         ein_mge = int(ein_raw) if is_valid_number(ein_raw) else 0
