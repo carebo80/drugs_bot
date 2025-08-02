@@ -4,6 +4,7 @@ import csv
 import unicodedata
 from utils.logger import log_import
 import os
+from typing import List, Tuple
 
 def get_env_var(key: str) -> str:
     return os.getenv(key, "")
@@ -130,40 +131,65 @@ def extract_article_info(line: str) -> dict:
         "belegnummer": belegnummer
     }
 
-def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str):
-    log_import(f"🔬 Tokens in detect_bewegung: {tokens}")
-    try:
-        if layout == "a" and len(tokens) != 5:
-            raise ValueError(f"Layout A erwartet 5 Tokens, erhalten: {len(tokens)}")
-        if layout == "b" and len(tokens) != 4:
-            raise ValueError(f"Layout B erwartet 4 Tokens, erhalten: {len(tokens)}")
+def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str, is_lieferant: bool = False):
+    """
+    Erwartet Tokens:
+    - Layout A: ['ein', 'aus', 'lager', 'bg_rez_nr']
+    - Layout B: ['ein', 'aus', 'bg_rez_nr']
+    """
 
-        ein_str = tokens[0].strip()
-        aus_str = tokens[1].strip()
-        lager_str = tokens[2].strip()
+    def is_valid_number(val):
+        return val.strip().isdigit()
 
-        ein_mge = int(ein_str) if ein_str.isdigit() else 0
-        aus_mge = int(aus_str) if aus_str.isdigit() else 0
-        lager = int(lager_str) if lager_str.lstrip("-").isdigit() else 0
+    # Entferne leere Tokens von hinten, bis bg_rez_nr sichtbar ist
+    tokens_cleaned = tokens.copy()
+    while tokens_cleaned and not is_valid_number(tokens_cleaned[-1]):
+        tokens_cleaned.pop()
 
-        dirty = False
-        if (ein_mge > 0 and aus_mge > 0) or (ein_mge == 0 and aus_mge == 0):
-            dirty = True
-        if lager < 0:
-            dirty = True
+    if layout == "a":
+        if len(tokens_cleaned) < 4:
+            return 0, 0, "", True
+        bewegung = tokens_cleaned[-4:]  # ['ein', 'aus', 'lager', 'bg_rez_nr']
+        ein_raw, aus_raw, _, bg_rez_nr_raw = bewegung
+    else:  # layout == "b"
+        if len(tokens_cleaned) < 3:
+            return 0, 0, "", True
+        bewegung = tokens_cleaned[-3:]  # ['ein', 'aus', 'bg_rez_nr']
+        ein_raw, aus_raw, bg_rez_nr_raw = bewegung
 
-        bg_rez_nr = ""
-        if layout == "a":
-            bg_rez_candidate = tokens[3].strip()
-            if re.fullmatch(r"\d{7,}", bg_rez_candidate):
-                bg_rez_nr = bg_rez_candidate
-            elif bg_rez_candidate == "0":
-                bg_rez_nr = "0"  # explizit erlauben
-            else:
-                bg_rez_nr = ""
+    # Bewegung für Lieferanten (immer 'ein')
+    if is_lieferant:
+        ein_mge = int(ein_raw) if is_valid_number(ein_raw) else 0
+        return ein_mge, 0, bg_rez_nr_raw if is_valid_number(bg_rez_nr_raw) else "", False
 
-        return ein_mge, aus_mge, bg_rez_nr, dirty
+    # Normale Bewegung
+    ein_mge = int(ein_raw) if is_valid_number(ein_raw) else 0
+    aus_mge = int(aus_raw) if is_valid_number(aus_raw) else 0
+    dirty = False
 
-    except Exception as e:
-        log_import(f"❌ Fehler Bewegungstokens: {tokens} → {e}")
-        return 0, 0, "", True
+    # Plausibilitätscheck
+    if ein_mge > 0 and aus_mge > 0:
+        dirty = True  # Beides gleichzeitig ist ungültig
+
+    bg_rez_nr = bg_rez_nr_raw if is_valid_number(bg_rez_nr_raw) else ""
+
+    return ein_mge, aus_mge, bg_rez_nr, dirty
+
+def clean_tokens_layout_a(tokens: list[str]) -> list[str]:
+    """
+    Entfernt überflüssige leere Tokens am Ende eines Layout-A-Eintrags,
+    wobei das letzte relevante Token bg_rez_nr ist (eine Zahl oder '0').
+    Alles danach (wie 'abh' oder '') wird abgeschnitten.
+    """
+    # Rückwärts durchgehen und ab dem letzten numerischen Token abschneiden
+    for i in range(len(tokens)-1, -1, -1):
+        if tokens[i].isdigit():
+            return tokens[:i+1]  # inkl. bg_rez_nr, ohne leer/abh danach
+    return tokens  # Fallback: nichts ändern
+def clean_trailing_empty_tokens(tokens: list[str], expected_len: int) -> list[str]:
+    """
+    Entfernt leere Tokens am Ende der Liste, solange sie über der erwarteten Länge liegt.
+    """
+    while len(tokens) > expected_len and tokens[-1] == '':
+        tokens = tokens[:-1]
+    return tokens

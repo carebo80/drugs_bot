@@ -1,8 +1,15 @@
 import csv
 import fitz
 import re
-from utils.helpers import normalize, detect_bewegung_from_structured_tokens, extract_article_info, slot_preserving_tokenizer_fixed, is_valid_bewegungsteil
 from utils.logger import log_import
+from utils.parser import detect_bewegung_from_structured_tokens
+from utils.helpers import (
+    normalize,
+    slot_preserving_tokenizer_fixed,
+    clean_tokens_layout_a,
+    clean_trailing_empty_tokens,
+    extract_article_info
+)
 
 def extract_table_rows_with_article(pdf_path: str):
     doc = fitz.open(pdf_path)
@@ -23,15 +30,15 @@ def extract_table_rows_with_article(pdf_path: str):
         text = page.get_text("text")
         layout = "a" if "BG Rez.Nr." in text else "b"
 
-        # Artikelzeile extrahieren
+        # Artikel-Metadaten extrahieren
         artikel_bezeichnung, belegnummer, packungsgroesse = "", "", 1
         for line in text.splitlines():
             if re.search(r"(?i)^medikament:", line):
                 log_import(f"🥚 Zeile MEDI: {line}")
                 meta = extract_article_info(line)
                 artikel_bezeichnung = meta["artikel_bezeichnung"]
-                packungsgroesse = meta["packungsgroesse"]
                 belegnummer = meta["belegnummer"]
+                packungsgroesse = meta["packungsgroesse"]
                 log_import(f"🥚 Artikel extrahiert: {artikel_bezeichnung}, PG: {packungsgroesse}, Beleg: {belegnummer}")
                 break
 
@@ -43,75 +50,73 @@ def extract_table_rows_with_article(pdf_path: str):
                 if not re.match(r"^\d{5,}\s+\d{2}\.\d{2}\.\d{4}", zeile):
                     continue
 
-                tokens = slot_preserving_tokenizer_fixed(zeile, layout)
+                tokens_raw = slot_preserving_tokenizer_fixed(zeile, layout)
+                tokens = clean_tokens_layout_a(tokens_raw) if layout == "a" else clean_trailing_empty_tokens(tokens_raw, 11)
 
-                # Kein Token am Ende mehr entfernen – nur loggen
-                if tokens and tokens[-1].strip() == "":
-                    log_import(f"🥝 Letztes Token ist leer (nicht entfernt) → {tokens}")
+                if tokens_raw != tokens:
+                    log_import(f"🧼 Token cleanup: {tokens_raw} → {tokens}")
 
-                bewegung_tokens = []
-                kopf_tokens = []
-
-                if layout == "a":
-                    gefunden = False
-                    for i in range(0, 3):  # Versuche von hinten -5, -6, -7
-                        bewegungsteil_kandidat = tokens[-(5 + i):-i if i > 0 else None]
-                        if is_valid_bewegungsteil(bewegungsteil_kandidat):
-                            bewegung_tokens = bewegungsteil_kandidat
-                            kopf_tokens = tokens[:-(5 + i)]
-                            gefunden = True
-                            log_import(f"✅ Bewegungsteil gefunden (Layout A, Offset {i}): {bewegung_tokens}")
-                            break
-                    if not gefunden:
-                        log_import(f"⚠️ Keine gültige Bewegungsteil-Struktur gefunden (Layout A): {tokens}")
-                        continue
-
-                elif layout == "b":
-                    if len(tokens) < 11:
-                        log_import(f"⚠️ Ungültige Tokenanzahl für Layout B: {len(tokens)}")
-                        continue
-                    bewegung_tokens = tokens[-4:]
-                    kopf_tokens = tokens[:-4]
-
-
-                if len(kopf_tokens) < 3:
+                if len(tokens) < 2:
                     continue
 
-                lfdnr, datum = kopf_tokens[0], kopf_tokens[1]
-                kundennr = kopf_tokens[2] if kopf_tokens[2].isdigit() else ""
+                if layout == "a":
+                    if len(tokens) < 10:
+                        log_import(f"⚠️ Zu wenige Tokens für Layout A: {len(tokens)}")
+                        continue
 
-                name_tokens = kopf_tokens[3:]
+                    bewegung_tokens = tokens[-5:]  # IMMER 5 letzte Tokens
+                    kopf_tokens = tokens[:-5]
+                else:  # Layout B
+                    if len(tokens) < 9:
+                        log_import(f"⚠️ Zu wenige Tokens für Layout B: {len(tokens)}")
+                        continue
+
+                    bewegung_tokens = tokens[-4:]  # IMMER 4 letzte Tokens
+                    kopf_tokens = tokens[:-4]
+
+                # Basisdaten extrahieren
+                lfdnr = kopf_tokens[0] if len(kopf_tokens) > 0 else ""
+                datum = kopf_tokens[1] if len(kopf_tokens) > 1 else ""
+
+                # Lieferanten-Logik
+                kundennr = kopf_tokens[2] if len(kopf_tokens) > 2 and kopf_tokens[2].isdigit() else ""
+                lieferant_kandidat = kopf_tokens[2] if not kundennr else ""
+                name_tokens = kopf_tokens[3:] if kundennr else kopf_tokens[3:] if len(kopf_tokens) > 3 else []
+
                 name_cleaned = []
-                arzt_trigger = ["DR.", "PROF.", "ARZT", "ÄRZTIN", "ZENTRUM", "PRAXIS", "SPITAL", "KLINIK", "TUCARE", "CLINICUM", "UNBEKANNT"]
                 for token in name_tokens:
-                    if re.match(r"^[A-Z]\d{6,}$", token):
-                        break
-                    if token.upper() in arzt_trigger:
-                        break
+                    if re.match(r"^[A-Z]\d{6,}$", token): break
+                    if re.search(r"(DR\.?|PROF\.?|SPITAL|KLINIK|PRAXIS|ZENTRUM|TUCARE|UNBEKANNT)", token.upper()): break
                     name_cleaned.append(token)
 
-                name_cleaned_str = " ".join(name_cleaned)
-                name_parts = name_cleaned_str.split()
-                vorname = name_parts[0] if len(name_parts) > 1 else ""
-                nachname = name_parts[1] if len(name_parts) > 1 else (name_parts[0] if name_parts else "")
-                name = nachname if vorname else name_cleaned_str
-
-                # Lieferantenerkennung
-                lieferant = ""
+                name_cleaned_str = " ".join(name_cleaned).strip()
                 normalized = normalize(name_cleaned_str)
-                for l in lieferanten_set:
-                    if normalize(l) in normalized:
-                        lieferant = l
-                        name = ""
-                        vorname = ""
-                        break
+                lieferant = ""
+                name = ""
+                vorname = ""
 
+                if normalize(lieferant_kandidat) in {normalize(l) for l in lieferanten_set}:
+                    lieferant = lieferant_kandidat.strip()
+                else:
+                    for l in lieferanten_set:
+                        if normalize(l) in normalized:
+                            lieferant = l
+                            break
+
+                if not lieferant:
+                    name_parts = name_cleaned_str.split()
+                    vorname = name_parts[0] if len(name_parts) > 1 else ""
+                    nachname = name_parts[1] if len(name_parts) > 1 else (name_parts[0] if name_parts else "")
+                    name = nachname if vorname else name_cleaned_str
+
+                # Bewegung erkennen
                 try:
-                    ein_mge, aus_mge, bg_rez_nr, dirty = detect_bewegung_from_structured_tokens(bewegung_tokens, layout)
+                    ein_mge, aus_mge, bg_rez_nr, dirty = detect_bewegung_from_structured_tokens(
+                        bewegung_tokens, layout, is_lieferant=bool(lieferant)
+                    )
                 except Exception as e:
                     log_import(f"❌ Fehler Bewegung: {bewegung_tokens} → {e}")
-                    ein_mge, aus_mge, bg_rez_nr = 0, 0, ""
-                    dirty = True
+                    ein_mge, aus_mge, bg_rez_nr, dirty = 0, 0, "", True
 
                 log_import(f"🥚 Bewegungstokens: {bewegung_tokens}")
                 log_import(f"🕎 Zeile {lfdnr} | Layout {layout} | Lieferant: {bool(lieferant)} | Ein_raw: '{ein_mge}' | Aus_raw: '{aus_mge}' → Ein: {ein_mge}, Aus: {aus_mge}, Dirty: {dirty}")
