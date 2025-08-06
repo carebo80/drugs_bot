@@ -133,49 +133,49 @@ def extract_article_info(line: str) -> dict:
 
 def detect_bewegung_from_structured_tokens(tokens: list[str], layout: str, is_lieferant: bool = False):
     """
-    Erwartet Tokens:
-    - Layout A: ['ein', 'aus', 'lager', 'bg_rez_nr']
-    - Layout B: ['ein', 'aus', 'bg_rez_nr']
+    Bewegungsextraktion robust für Layout A + B:
+    - Layout A: ['ein', 'aus', 'lager', 'bg_rez_nr', 'abh']
+    - Layout B: ['ein', 'aus', 'lager', '']
     """
 
-    def is_valid_number(val):
-        return val.strip().isdigit()
+    def safe_int(val: str) -> int:
+        try:
+            return int(val.strip())
+        except:
+            return 0
 
-    # Entferne leere Tokens von hinten, bis bg_rez_nr sichtbar ist
+    # Entferne Leerfelder am Ende
     tokens_cleaned = tokens.copy()
-    while tokens_cleaned and not is_valid_number(tokens_cleaned[-1]):
+    while tokens_cleaned and tokens_cleaned[-1].strip() == "":
         tokens_cleaned.pop()
 
+    # Standardwerte
+    ein_raw, aus_raw, lager_raw, bg_rez_nr_raw = "", "", "", ""
+
     if layout == "a":
-        if len(tokens_cleaned) < 4:
+        if len(tokens_cleaned) >= 4:
+            ein_raw, aus_raw, lager_raw, bg_rez_nr_raw = tokens_cleaned[-4:]
+        else:
             return 0, 0, "", True
-        bewegung = tokens_cleaned[-4:]  # ['ein', 'aus', 'lager', 'bg_rez_nr']
-        ein_raw, aus_raw, _, bg_rez_nr_raw = bewegung
-        
-    else:  # layout == "b"
-        if len(tokens_cleaned) < 3:
+    elif layout == "b":
+        if len(tokens_cleaned) >= 3:
+            ein_raw = tokens_cleaned[-3]
+            aus_raw = tokens_cleaned[-2]
+            lager_raw = tokens_cleaned[-1]
+        else:
             return 0, 0, "", True
-        bewegung = tokens_cleaned[-3:]  # ['ein', 'aus', 'bg_rez_nr']
-        ein_raw, aus_raw, _ = bewegung
-        bg_rez_nr_raw = ""
-        
-    # Bewegung für Lieferanten (immer 'ein')
+
+    # Für Lieferant: nur EIN zählt
     if is_lieferant:
-        ein_mge = int(ein_raw) if is_valid_number(ein_raw) else 0
-        return ein_mge, 0, bg_rez_nr_raw if is_valid_number(bg_rez_nr_raw) else "", False
+        return safe_int(ein_raw), 0, "", False
 
-    # Normale Bewegung
-    ein_mge = int(ein_raw) if is_valid_number(ein_raw) else 0
-    aus_mge = int(aus_raw) if is_valid_number(aus_raw) else 0
-    dirty = False
+    ein = safe_int(ein_raw)
+    aus = safe_int(aus_raw)
 
-    # Plausibilitätscheck
-    if ein_mge > 0 and aus_mge > 0:
-        dirty = True  # Beides gleichzeitig ist ungültig
+    # Beides gleichzeitig?
+    dirty = ein > 0 and aus > 0
 
-    bg_rez_nr = bg_rez_nr_raw if is_valid_number(bg_rez_nr_raw) else ""
-
-    return ein_mge, aus_mge, bg_rez_nr, dirty
+    return ein, aus, "", dirty
 
 def clean_tokens_layout_a(tokens: list[str]) -> list[str]:
     """
@@ -188,10 +188,12 @@ def clean_tokens_layout_a(tokens: list[str]) -> list[str]:
         if tokens[i].isdigit():
             return tokens[:i+1]  # inkl. bg_rez_nr, ohne leer/abh danach
     return tokens  # Fallback: nichts ändern
+def trim_trailing_empty_tokens(tokens: list[str]) -> list[str]:
+    """Entfernt alle leeren Tokens am Ende der Liste, unabhängig von erwarteter Länge."""
+    while tokens and tokens[-1] == '':
+        tokens.pop()
+    return tokens
 def clean_trailing_empty_tokens(tokens: list[str], expected_len: int) -> list[str]:
-    """
-    Entfernt leere Tokens am Ende der Liste, solange sie über der erwarteten Länge liegt.
-    """
     while len(tokens) > expected_len and tokens[-1] == '':
         tokens = tokens[:-1]
     return tokens

@@ -1,8 +1,22 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import logging
+import os
+import re
 
 DB_PATH = "data/laufende_liste.db"
+LOG_PATH = "logs/delta.log"
+EXPORT_PATH = "logs/x_candidates_export.csv"
+os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+
+# Logging initialisieren
+logging.basicConfig(
+    filename=LOG_PATH,
+    filemode="a",
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO
+)
 
 st.set_page_config(page_title="📄 Delta-Abgleich", layout="wide")
 st.title("📄 Excel–PDF Abgleich (Delta-Analyse)")
@@ -14,92 +28,168 @@ def lade_daten():
     conn.close()
     return df
 
-# 1. Daten laden und vorbereiten
 df = lade_daten()
+
+# UI: Parameter
+st.markdown("### ⚙️ Parameter")
+
+liste_wahl = st.selectbox("📁 Welche Liste aus Excel prüfen?", options=["alle"] + sorted(df[df["quelle"] == "excel"]["liste"].dropna().unique().tolist()), index=0)
+simulate = st.checkbox("🔧 Nur simulieren (keine Änderungen an DB)", value=True)
+
+# Vorverarbeitung
 df_excel = df[df["quelle"] == "excel"].copy()
 df_pdf = df[df["quelle"] == "pdf"].copy()
 
-# 2. Vergleichsschlüssel definieren
-keys = ["belegnummer", "datum", "name", "vorname", "artikel_bezeichnung"]
+if liste_wahl != "alle":
+    df_excel = df_excel[df_excel["liste"] == liste_wahl]
 
-# 3. Merge mit Kennzeichnung
-delta = df_excel.merge(df_pdf, on=keys, how="left", suffixes=("_excel", "_pdf"), indicator=True)
+def name_token(n):
+    return str(n).strip().split(" ")[0].lower()
 
-# 4. KS-Kennzeichnung setzen (nur für Excel-Zeilen relevant)
+def normalize_artikel(s):
+    return re.sub(r"\s+", " ", str(s).lower()).strip()
+
+df_excel["name_token"] = df_excel["name"].apply(name_token)
+df_pdf["name_token"] = df_pdf["name"].apply(name_token)
+df_excel["artikel_norm"] = df_excel["artikel_bezeichnung"].apply(normalize_artikel)
+df_pdf["artikel_norm"] = df_pdf["artikel_bezeichnung"].apply(normalize_artikel)
+
+# Lieferanten berücksichtigen
+df_excel["lieferant"] = df_excel["lieferant"].fillna("").str.lower().str.strip()
+df_pdf["lieferant"] = df_pdf["lieferant"].fillna("").str.lower().str.strip()
+
+keys = ["belegnummer", "datum", "name_token", "artikel_norm", "lieferant"]
+
+df_delta = df_excel.merge(df_pdf, on=keys, how="left", suffixes=("_excel", "_pdf"), indicator=True)
+
+# delta_detail (optionale Spalte mit Feldunterschieden)
+def berechne_delta_detail(row):
+    diffs = []
+    for f in ["ein_mge", "aus_mge", "ein_pack", "aus_pack", "lager", "bg", "rez_nr"]:
+        if row.get(f + "_excel") != row.get(f + "_pdf"):
+            diffs.append(f)
+    return ", ".join(diffs)
+
+df_delta["delta_detail"] = df_delta.apply(berechne_delta_detail, axis=1)
+
+# Kontrollstatus berechnen
 def berechne_ks(row):
-    if row["_merge"] == "both":
-        return "x"  # gefunden, identisch
-    elif pd.notna(row.get("eingang_pdf")) or pd.notna(row.get("ausgang_pdf")):
-        return "xx"  # gefunden + ergänzbar
+    if row["_merge"] != "both":
+        return ""
+    menge_excel = (row["ein_mge_excel"], row["aus_mge_excel"])
+    menge_pdf   = (row["ein_mge_pdf"],   row["aus_mge_pdf"])
+    if menge_excel == menge_pdf:
+        return "x"
+    elif pd.notna(row["ein_mge_pdf"]) or pd.notna(row["aus_mge_pdf"]):
+        return "xx"
     else:
-        return ""  # kein PDF vorhanden
+        return ""
 
-delta["ks"] = delta.apply(berechne_ks, axis=1)
+df_delta["ks"] = df_delta.apply(berechne_ks, axis=1)
 
-# 5. Filter
-df_filtered = delta.copy()
+# Übersicht anzeigen
+anz_x = (df_delta["ks"] == "x").sum()
+anz_xx = (df_delta["ks"] == "xx").sum()
+anz_none = (df_delta["ks"] == "").sum()
 
-st.sidebar.markdown("### 🔍 Filter")
-ks_filter = st.sidebar.selectbox("KS-Status (nur für Excel)", ["Alle", "", "x", "xx"], index=0)
-if ks_filter != "Alle":
-    df_filtered = df_filtered[df_filtered["ks"] == ks_filter]
+st.markdown(f"🔢 **Statusübersicht:** `xx`: {anz_xx} | `x`: {anz_x} | leer: {anz_none}")
 
-# 6. Anzeige
-st.caption("🔎 Hinweis: KS (Kontrollstatus) wird nur für Excel-Zeilen geführt. PDF-Zeilen bleiben davon unberührt.")
-st.info(f"Zeige {len(df_filtered)} von {len(delta)} Einträgen")
-st.dataframe(df_filtered[[*keys, "eingang_excel", "ausgang_excel", "eingang_pdf", "ausgang_pdf", "ks"]], use_container_width=True)
+anzeige_spalten = ["belegnummer", "datum", "name_token", "artikel_norm", "lieferant", "ein_mge_excel", "ein_mge_pdf", "aus_mge_excel", "aus_mge_pdf", "ks", "delta_detail"]
 
-# 7. Werte übernehmen bei "xx"
-if st.button("🟢 PDF-Werte übernehmen bei KS = 'xx'"):
-    df_to_update = delta[delta["ks"] == "xx"]
-    if not df_to_update.empty:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        updated_count = 0
-        for _, row in df_to_update.iterrows():
-            sql = """
-                UPDATE bewegungen
-                SET eingang = ?, ausgang = ?, ks = 'xx'
-                WHERE quelle = 'excel' AND belegnummer = ? AND datum = ? AND name = ? AND vorname = ? AND artikel_bezeichnung = ?
-            """
-            cursor.execute(sql, (
-                row.get("eingang_pdf"),
-                row.get("ausgang_pdf"),
-                row["belegnummer"],
-                row["datum"],
-                row["name"],
-                row["vorname"],
-                row["artikel_bezeichnung"]
-            ))
-            updated_count += 1
+def highlight_differences(row):
+    styles = []
+    for col in anzeige_spalten:
+        if col == "ein_mge_excel" and row["ein_mge_excel"] != row["ein_mge_pdf"]:
+            styles.append("background-color: #ffcccb")
+        elif col == "aus_mge_excel" and row["aus_mge_excel"] != row["aus_mge_pdf"]:
+            styles.append("background-color: #ffcccb")
+        else:
+            styles.append("")
+    return styles
+
+# Pagination
+st.markdown("### 📊 Delta-Vergleich")
+page_size = 20
+total_rows = len(df_delta)
+total_pages = (total_rows - 1) // page_size + 1
+page = st.number_input("📄 Seite wählen", min_value=1, max_value=max(1, total_pages), value=1, step=1)
+start = (page - 1) * page_size
+end = start + page_size
+df_page = df_delta.iloc[start:end]
+
+st.markdown("💡 Unterschiede in Mengen sind farbig markiert.")
+styled_df = df_page[anzeige_spalten].style.apply(highlight_differences, axis=1)
+st.dataframe(styled_df, use_container_width=True)
+
+# Delta-Abgleich durchführen
+if st.button("🚀 Delta-Abgleich durchführen"):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    updated, deleted = 0, 0
+    x_candidates = []
+
+    for _, row in df_delta.iterrows():
+        status = row["ks"]
+        if status == "xx":
+            log_msg = f"XX: Ergänze → {row['belegnummer']} | {row['datum']} | {row['name_excel']} | {row['artikel_bezeichnung_excel']} | delta: {row['delta_detail']}"
+            if not simulate:
+                cursor.execute("""
+                    UPDATE bewegungen
+                    SET ein_mge = ?, aus_mge = ?, ein_pack = ?, aus_pack = ?, ks = 'xx'
+                    WHERE quelle = 'excel' AND belegnummer = ? AND datum = ? AND name = ? AND vorname = ? AND artikel_bezeichnung = ?
+                """, (
+                    row["ein_mge_pdf"], row["aus_mge_pdf"],
+                    row["ein_pack_pdf"], row["aus_pack_pdf"],
+                    row["belegnummer"], row["datum"], row["name_excel"], row["vorname_excel"], row["artikel_bezeichnung_excel"]
+                ))
+                logging.info(log_msg + " → ✅ committed")
+            else:
+                logging.info(log_msg + " → 🔍 simulation")
+            updated += 1
+
+        elif status == "x":
+            x_candidates.append(row)
+            log_msg = f"X: Lösche → {row['belegnummer']} | {row['datum']} | {row['name_pdf']} | {row['artikel_bezeichnung_pdf']}"
+            if not simulate:
+                cursor.execute("""
+                    DELETE FROM bewegungen
+                    WHERE quelle = 'pdf' AND belegnummer = ? AND datum = ? AND name = ? AND vorname = ? AND artikel_bezeichnung = ?
+                """, (
+                    row["belegnummer"], row["datum"], row["name_pdf"], row["vorname_pdf"], row["artikel_bezeichnung_pdf"]
+                ))
+                logging.info(log_msg + " → ✅ committed")
+            else:
+                logging.info(log_msg + " → 🔍 simulation")
+            deleted += 1
+
+        else:
+            log_msg = f"--: Kein Match → {row['belegnummer']} | {row['datum']} | {row['name_excel']} | {row['artikel_bezeichnung_excel']}"
+            logging.info(log_msg)
+
+    if not simulate:
         conn.commit()
-        conn.close()
-        st.success(f"✅ {updated_count} Excel-Einträge aktualisiert (KS = 'xx').")
+        st.success(f"✅ {updated} ergänzt (xx), {deleted} gelöscht (x)")
+        logging.info(f"🔁 Delta-Abgleich durchgeführt (real): {updated} ergänzt, {deleted} gelöscht")
     else:
-        st.info("ℹ️ Keine 'xx'-Einträge zum Aktualisieren gefunden.")
+        st.info(f"🔍 Simulation: {updated} würden ergänzt (xx), {deleted} würden gelöscht (x)")
+        logging.info(f"🔁 Delta-Abgleich simuliert: {updated} ergänzt, {deleted} gelöscht")
 
-# 8. Option: PDF-Einträge mit KS = x löschen
-if st.button("🗑️ PDF-Einträge mit KS = 'x' löschen"):
-    df_to_delete = delta[delta["ks"] == "x"]
-    if not df_to_delete.empty:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        deleted_count = 0
-        for _, row in df_to_delete.iterrows():
-            sql = """
-                DELETE FROM bewegungen
-                WHERE quelle = 'pdf' AND belegnummer = ? AND datum = ? AND name = ? AND vorname = ? AND artikel_bezeichnung = ?
-            """
-            cursor.execute(sql, (
-                row["belegnummer"],
-                row["datum"],
-                row["name"],
-                row["vorname"],
-                row["artikel_bezeichnung"]
-            ))
-            deleted_count += 1
-        conn.commit()
-        conn.close()
-        st.success(f"🗑️ {deleted_count} PDF-Einträge gelöscht (KS = 'x').")
-    else:
-        st.info("ℹ️ Keine 'x'-PDF-Einträge gefunden.")
+    if x_candidates:
+        df_x = pd.DataFrame(x_candidates)
+        df_x.to_csv(EXPORT_PATH, index=False)
+        st.download_button("⬇️ CSV aller 'x'-Kandidaten herunterladen", data=df_x.to_csv(index=False), file_name="x_candidates.csv", mime="text/csv")
+
+    conn.close()
+
+# 🔍 Log-Anzeige
+st.markdown("---")
+st.markdown("### 📝 Delta-Log anzeigen")
+if os.path.exists(LOG_PATH):
+    with open(LOG_PATH, "r") as log_file:
+        log_lines = log_file.readlines()[-100:]  # letzte 100 Zeilen
+        st.text_area("📄 Logauszug", value="".join(log_lines), height=300)
+    if st.button("🧹 Logdatei löschen"):
+        os.remove(LOG_PATH)
+        st.success("🗑️ Logdatei gelöscht.")
+else:
+    st.info("ℹ️ Noch keine Logdatei vorhanden.")

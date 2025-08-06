@@ -106,12 +106,24 @@ def extract_table_rows_with_article(pdf_path: str):
                     ein_mge, aus_mge, bg_rez_nr, dirty = detect_bewegung_from_structured_tokens(
                         bewegung_tokens, layout, is_lieferant=bool(lieferant)
                     )
+                    log_import(f"📦 Layout: {layout} | LfdNr: {lfdnr} | Ein={ein_mge} | Aus={aus_mge} | Dirty={dirty}")
                 except Exception as e:
                     log_import(f"❌ Fehler Bewegung: {bewegung_tokens} → {e}")
                     ein_mge, aus_mge, bg_rez_nr, dirty = 0, 0, "", True
+                
+                ein_pack, aus_pack = 0, 0
+                
+                if ein_mge > 0:
+                    ein_pack = meta["packungsgroesse"]
+                    log_import(f"EIN: {meta['packungsgroesse']}")
+                else:
+                    ein_pack = 0
 
-                ein_pack = packungsgroesse if ein_mge > 0 else 0
-                aus_pack = packungsgroesse if aus_mge > 0 else 0
+                if aus_mge > 0:
+                    aus_pack = meta["packungsgroesse"]
+                    log_import(f"AUS: {meta['packungsgroesse']}")
+                else:
+                    aus_pack = 0
 
                 row_dict = {
                     "lfdnr": lfdnr,
@@ -137,5 +149,6 @@ def extract_table_rows_with_article(pdf_path: str):
                     "belegnummer": belegnummer,
                     "packungsgroesse": packungsgroesse
                 }, layout, dirty))
+                log_import(f"➡️ Row to be saved: {row_dict}")
 
     return all_rows

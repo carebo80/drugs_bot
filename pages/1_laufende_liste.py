@@ -76,7 +76,7 @@ if "selected_row" not in st.session_state:
 st.subheader("📋 Daten-Tabelle")
 gb = GridOptionsBuilder.from_dataframe(df)
 gb.configure_column("id", editable=False)
-gb.configure_default_column(editable=False, resizable=True)
+gb.configure_default_column(editable=True, resizable=True)
 gb.configure_selection(selection_mode="single", use_checkbox=True)
 grid_options = gb.build()
 
@@ -232,49 +232,61 @@ if selected.get("new", False) or valid_selection:
 
         # Submit-Button
         if st.form_submit_button("📏 Änderungen speichern"):
+            st.write("📥 Form Submission triggered")  # 🔍 Debug: Wird der Button gedrückt?
+
+            # Zeige die aktualisierten Daten zur Kontrolle
+            st.json(updated)
+
             if not updated["datum"] or not updated["datum"].strip():
                 st.error("⚠️ Bitte ein gültiges Datum eingeben.")
                 st.stop()
 
             try:
                 datum_obj = datetime.strptime(updated["datum"], "%d.%m.%Y").date()
-            except ValueError:
-                st.error("⚠️ Bitte gültiges Datum im Format TT.MM.JJJJ eingeben.")
+            except ValueError as e:
+                st.error(f"⚠️ Ungültiges Datum. Fehler: {e}")
                 st.stop()
 
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
 
-            if "id" in selected:
-                sql = """UPDATE bewegungen SET artikel_bezeichnung = ?, belegnummer = ?, liste = ?, datum = ?, 
-                         ein_mge = ?, ein_pack = ?, aus_mge = ?, aus_pack = ?,
-                         name = ?, vorname = ?, lieferant = ?, quelle = ?, dirty = ? WHERE id = ?"""
-                values = [
-                    updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
-                    updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
-                    updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
-                    selected["id"]
-                ]
-            else:
-                sql = """INSERT INTO bewegungen (
-                            artikel_bezeichnung, belegnummer, liste, datum,
-                            ein_mge, ein_pack, aus_mge, aus_pack,
-                            name, vorname, lieferant, quelle, dirty, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-                jetzt = pd.Timestamp.now().isoformat()
-                values = [
-                    updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
-                    updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
-                    updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
-                    jetzt, jetzt
-                ]
+                if "id" in selected and selected["id"] is not None:
+                    sql = """UPDATE bewegungen SET 
+                                artikel_bezeichnung = ?, belegnummer = ?, liste = ?, datum = ?, 
+                                ein_mge = ?, ein_pack = ?, aus_mge = ?, aus_pack = ?,
+                                name = ?, vorname = ?, lieferant = ?, quelle = ?, dirty = ? 
+                             WHERE id = ?"""
+                    values = [
+                        updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
+                        updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
+                        updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
+                        selected["id"]
+                    ]
+                    cursor.execute(sql, values)
+                else:
+                    sql = """INSERT INTO bewegungen (
+                                artikel_bezeichnung, belegnummer, liste, datum,
+                                ein_mge, ein_pack, aus_mge, aus_pack,
+                                name, vorname, lieferant, quelle, dirty, created_at, updated_at
+                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                    jetzt = pd.Timestamp.now().isoformat()
+                    values = [
+                        updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
+                        updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
+                        updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
+                        jetzt, jetzt
+                    ]
+                    cursor.execute(sql, values)
 
-                cursor.execute(sql, values)
                 conn.commit()
                 conn.close()
 
-                st.success("✅ Neuer Eintrag gespeichert.")
+                st.success("✅ Änderungen erfolgreich gespeichert.")
                 st.session_state["selected_row"] = {}
                 st.session_state["__trigger_refresh__"] = True
-                st.stop()  # ⬅️ verhindert doppeltes Formular nach Speichern!
-
+                st.rerun()
+                #st.stop()  # ⬅️ verhindert doppeltes Formular nach Speichern!
+            except Exception as e:
+                st.error(f"❌ Fehler beim Speichern: {e}")
+                st.exception(e)

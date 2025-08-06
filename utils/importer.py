@@ -16,7 +16,7 @@ def run_import(parsed_df: pd.DataFrame):
 
     allowed_cols = [
         "datum", "name", "vorname", "lieferant",
-        "ein_mge", "aus_mge", "bg_rez_nr",
+        "ein_mge", "ein_pack", "aus_mge", "aus_pack", "bg_rez_nr",
         "artikel_bezeichnung", "belegnummer",
         "dirty", "liste", "quelle"
     ]
