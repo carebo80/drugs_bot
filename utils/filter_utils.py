@@ -1,3 +1,4 @@
+# filter_utils.py
 import pandas as pd
 import streamlit as st
 import os
@@ -7,9 +8,9 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if med_filter:
         df = df[df["artikel_bezeichnung"].str.contains(med_filter, case=False, na=False)]
 
-    beleg_filter = st.session_state.get("beleg_filter", "").strip()
-    if beleg_filter:
-        df = df[df["belegnummer"].astype(str).str.contains(beleg_filter, na=False)]
+    pharma_filter = st.session_state.get("pharma_filter", "").strip()
+    if pharma_filter:
+        df = df[df["pharmacode"].astype(str).str.contains(pharma_filter, na=False)]
 
     name_filter = st.session_state.get("name_filter", "Alle")
     if name_filter != "Alle":

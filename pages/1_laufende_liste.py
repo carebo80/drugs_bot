@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder
 from st_aggrid.shared import GridUpdateMode
-from filter_utils import filter_dataframe
+from utils.filter_utils import filter_dataframe
 from ui_components import sicherheitsdialog
 import os
 
@@ -57,7 +57,7 @@ if st.sidebar.button("🔁 Alle Filter zurücksetzen"):
 st.sidebar.header("🔍 Filter")
 temp_df = lade_daten()
 st.sidebar.text_input("🎤 Medikament enthält...", value=st.session_state.get("med_filter", ""), key="med_filter")
-st.sidebar.text_input("📄 Belegnummer enthält...", value=st.session_state.get("beleg_filter", ""), key="beleg_filter")
+st.sidebar.text_input("📄 Pharmacode enthält...", value=st.session_state.get("pharma_filter", ""), key="pharma_filter")
 st.sidebar.selectbox("👤 Name", ["Alle"] + sorted(temp_df["name"].dropna().unique()), key="name_filter")
 st.sidebar.selectbox("🧑 Vorname", ["Alle"] + sorted(temp_df["vorname"].dropna().unique()), key="vorname_filter")
 st.sidebar.selectbox("🏢 Lieferant", ["Alle"] + sorted(temp_df["lieferant"].dropna().unique()), key="lieferant_filter")
@@ -110,7 +110,7 @@ with col1:
     if st.button("➕ Neue Zeile anlegen"):
         st.session_state["selected_row"] = {
             "artikel_bezeichnung": "",
-            "belegnummer": "",
+            "pharmacode": "",
             "liste": "b",
             "datum": "",
             "name": "",
@@ -188,7 +188,7 @@ if selected.get("new", False) or valid_selection:
         updated = {}
 
         c1a, c1b, c1c, c1d = st.columns([1, 3, 1, 1])
-        updated["belegnummer"] = c1a.text_input("Belegnummer", value=selected.get("belegnummer", ""), key="form_beleg")
+        updated["pharmacode"] = c1a.text_input("Pharmacode", value=selected.get("pharmacode", ""), key="form_pharmacode")
         updated["artikel_bezeichnung"] = c1b.text_input("Artikel-Bezeichnung", value=selected.get("artikel_bezeichnung", ""), key="form_artikel")
         updated["datum"] = c1c.text_input("Datum (TT.MM.JJJJ)", value=selected.get("datum", ""), key="form_datum")
         updated["liste"] = c1d.selectbox("Liste", ["a", "b"], index=0 if selected.get("liste") == "a" else 1, key="form_liste")
@@ -253,12 +253,12 @@ if selected.get("new", False) or valid_selection:
 
                 if "id" in selected and selected["id"] is not None:
                     sql = """UPDATE bewegungen SET 
-                                artikel_bezeichnung = ?, belegnummer = ?, liste = ?, datum = ?, 
+                                artikel_bezeichnung = ?, pharmacode = ?, liste = ?, datum = ?, 
                                 ein_mge = ?, ein_pack = ?, aus_mge = ?, aus_pack = ?,
                                 name = ?, vorname = ?, lieferant = ?, quelle = ?, dirty = ? 
                              WHERE id = ?"""
                     values = [
-                        updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
+                        updated["artikel_bezeichnung"], updated["pharmacode"], updated["liste"], datum_obj.isoformat(),
                         updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
                         updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
                         selected["id"]
@@ -266,13 +266,13 @@ if selected.get("new", False) or valid_selection:
                     cursor.execute(sql, values)
                 else:
                     sql = """INSERT INTO bewegungen (
-                                artikel_bezeichnung, belegnummer, liste, datum,
+                                artikel_bezeichnung, pharmacode, liste, datum,
                                 ein_mge, ein_pack, aus_mge, aus_pack,
                                 name, vorname, lieferant, quelle, dirty, created_at, updated_at
                              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
                     jetzt = pd.Timestamp.now().isoformat()
                     values = [
-                        updated["artikel_bezeichnung"], updated["belegnummer"], updated["liste"], datum_obj.isoformat(),
+                        updated["artikel_bezeichnung"], updated["pharmacode"], updated["liste"], datum_obj.isoformat(),
                         updated["ein_mge"], updated["ein_pack"], updated["aus_mge"], updated["aus_pack"],
                         updated["name"], updated["vorname"], updated["lieferant"], updated["quelle"], updated["dirty"],
                         jetzt, jetzt

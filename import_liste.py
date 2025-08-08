@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import re
 from pathlib import Path
+from datetime import datetime
 
 def extrahiere_packung(text):
     match = re.search(r"(\d+)\s*Stk", str(text))
@@ -21,91 +22,88 @@ def ist_lieferant(name, lieferanten_set):
     name_upper = name.upper()
     return any(name_upper.startswith(lieferant) for lieferant in lieferanten_set)
 
-def importiere_excel(pfad_excel, pfad_sqlite="data/laufende_liste.db", sheet="Laufende Liste", liste_filter=None):
+def parse_datum_jjjjmmtt(raw):
+    try:
+        return datetime.strptime(str(int(raw)), "%Y%m%d").strftime("%d.%m.%Y")
+    except:
+        return None
+
+def importiere_excel(pfad_excel, pfad_sqlite="data/laufende_liste.db"):
     spalten_map = {
-        "Beleg vorhanden?": "belegnummer",
-        "Artikel-Bezeichnung": "artikel_bezeichnung",
-        "Liste": "liste",
-        "Datum": "datum",
-        "Ein.Mge": "ein_mge",
-        "Ein.Pack": "ein_pack",
-        "Eingang": "eingang",
-        "Aus.Mge": "aus_mge",
-        "Aus.Pack": "aus_pack",
-        "Ausgang": "ausgang",
-        "KS": "ks",
-        "Total": "total",
-        "Name": "name",
-        "Vorname": "vorname",
-        "Bemerkung": "bemerkung",
-        "PriRez": "prirez",
-        "LS-Nummer": "ls_nummer"
+        "Menge": "ein_mge",
+        "Artikelbezeichnung": "artikel_bezeichnung",
+        "Verzeichnis": "liste",
+        "Pharmacode": "pharmacode",
+        "Lieferdatum": "datum",
+        "Fakturanr.": "faktura_nummer"
     }
 
-    print(f"\U0001F4C4 Lade Excel-Datei: {pfad_excel}")
-    df = pd.read_excel(pfad_excel, sheet_name=sheet)
+    print(f"📄 Lade Excel-Datei: {pfad_excel}")
+    df = pd.read_excel(pfad_excel, sheet_name=0, header=2)
 
-    # Spalten umbenennen
-    df_clean = df[list(spalten_map.keys())].rename(columns=spalten_map)
+    # Nur relevante Spalten übernehmen
+    df = df[[col for col in spalten_map if col in df.columns]].rename(columns=spalten_map)
 
-    # Optional Liste A oder B filtern
-    if liste_filter:
-        df_clean = df_clean[df_clean["liste"].str.lower() == liste_filter.lower()]
+    # Liste (a / b)
+    df["liste"] = df["liste"].astype(str).str.strip().str.lower()
 
-    # Leere oder ungültige Zeilen filtern
-    df_clean = df_clean[df_clean["artikel_bezeichnung"].notna() & df_clean["datum"].notna()]
+    # Datum konvertieren
+    df["datum"] = df["datum"].apply(parse_datum_jjjjmmtt)
+    df = df[df["datum"].notna()]
 
-    # Robust: ungültige Datumseinträge rausfiltern
-    df_clean["datum"] = pd.to_datetime(df_clean["datum"], errors="coerce")
-    df_clean = df_clean[df_clean["datum"].notna()]
-    df_clean["datum"] = df_clean["datum"].dt.strftime("%d.%m.%Y")
+    # Packung aus Artikelname extrahieren
+    df["ein_pack"] = df.apply(
+        lambda row: extrahiere_packung(row["artikel_bezeichnung"]) if pd.notna(row["ein_mge"]) else None, axis=1)
 
-    # Packung extrahieren wenn nötig
-    df_clean["ein_pack"] = df_clean.apply(
-        lambda row: extrahiere_packung(row["artikel_bezeichnung"]) if pd.notna(row["ein_mge"]) and pd.isna(row["ein_pack"]) else row["ein_pack"], axis=1)
-    df_clean["aus_pack"] = df_clean.apply(
-        lambda row: extrahiere_packung(row["artikel_bezeichnung"]) if pd.notna(row["aus_mge"]) and pd.isna(row["aus_pack"]) else row["aus_pack"], axis=1)
+    # Eingang berechnen
+    df["eingang"] = df.apply(
+        lambda row: row["ein_mge"] * row["ein_pack"] if pd.notna(row["ein_mge"]) and pd.notna(row["ein_pack"]) else None, axis=1)
 
-    df_clean["eingang"] = df_clean.apply(
-        lambda row: row["ein_mge"] * row["ein_pack"] if pd.notna(row["ein_mge"]) and pd.notna(row["ein_pack"]) else row["eingang"], axis=1)
-    df_clean["ausgang"] = df_clean.apply(
-        lambda row: row["aus_mge"] * row["aus_pack"] if pd.notna(row["aus_mge"]) and pd.notna(row["aus_pack"]) else row["ausgang"], axis=1)
+    # Standardfelder für DB
+    df["aus_mge"] = None
+    df["aus_pack"] = None
+    df["ausgang"] = None
+    df["total"] = df["eingang"]
+    df["name"] = None
+    df["vorname"] = None
+    df["ks"] = None
+    df["bemerkung"] = None
+    df["prirez"] = None
+    df["quelle"] = "excel"
 
-    df_clean["total"] = df_clean.apply(
-        lambda row: row["eingang"] - row["ausgang"] if pd.notna(row["eingang"]) and pd.notna(row["ausgang"]) else row["total"], axis=1)
-
-    # Lieferanten aus CSV (fuzzy: StartsWith) oder wenn LS-Nummer gesetzt
+    # Lieferantenerkennung via pharmacode (optional)
     lieferanten_set = lade_lieferanten_csv()
-    lieferanten_mask = (
-        df_clean["ein_mge"].notna() & (
-            df_clean["name"].apply(lambda x: ist_lieferant(x, lieferanten_set)) |
-            df_clean["ls_nummer"].notna()
-        )
-    )
-    df_clean.loc[lieferanten_mask, "lieferant"] = df_clean.loc[lieferanten_mask, "name"]
-    df_clean.loc[lieferanten_mask, "name"] = None
-    df_clean.loc[lieferanten_mask, "vorname"] = None
+    df["lieferant"] = df["pharmacode"].apply(lambda val: val if ist_lieferant(str(val), lieferanten_set) else None)
 
-    df_clean["quelle"] = "excel"
+    # Zielspalten in richtiger Reihenfolge
+    df = df[
+        ["pharmacode", "datum", "artikel_bezeichnung", "ein_mge", "ein_pack", "eingang",
+         "aus_mge", "aus_pack", "ausgang", "total", "name", "vorname", "lieferant",
+         "ks", "bemerkung", "prirez", "faktura_nummer", "liste", "quelle"]
+    ]
 
-    # In SQLite einfügen
+    # In Datenbank speichern
     conn = sqlite3.connect(pfad_sqlite)
-    df_clean.to_sql("bewegungen", conn, if_exists="append", index=False)
+    df.to_sql("bewegungen", conn, if_exists="append", index=False)
     conn.close()
 
-    print(f"\u2705 {len(df_clean)} Zeilen importiert (Liste = {liste_filter or 'alle'}).")
+    print(f"✅ {len(df)} Zeilen importiert aus: {pfad_excel.name}")
 
-# CLI-Aufruf
+    # Logging
+    log_path = Path("logs/import.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a") as f:
+        f.write(f"{datetime.now().isoformat()} | excel | {pfad_excel} | {len(df)} Zeilen\n")
+
+# CLI
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("\u2757 Bitte Pfad zur Excel-Datei angeben.\nBeispiel: python import_liste.py 'btm.xlsx' [a|b|leer]")
+        print("❗ Bitte Pfad zur Excel-Datei angeben.\nBeispiel: python import_liste.py upload/liste.xlsx")
         sys.exit(1)
 
     pfad_excel = Path(sys.argv[1])
-    liste_filter = sys.argv[2] if len(sys.argv) > 2 else None
-
     if not pfad_excel.exists():
-        print(f"\u2757 Datei nicht gefunden: {pfad_excel}")
+        print(f"❗ Datei nicht gefunden: {pfad_excel}")
         sys.exit(1)
 
-    importiere_excel(pfad_excel, liste_filter=liste_filter)
+    importiere_excel(pfad_excel)
