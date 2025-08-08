@@ -5,7 +5,7 @@ from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder
 from st_aggrid.shared import GridUpdateMode
 from utils.filter_utils import filter_dataframe
-from ui_components import sicherheitsdialog
+from utils.ui_components import sicherheitsdialog
 import os
 
 DB_PATH = "data/laufende_liste.db"
