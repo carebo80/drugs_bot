@@ -7,8 +7,11 @@ from st_aggrid.shared import GridUpdateMode
 from utils.filter_utils import filter_dataframe
 from utils.ui_components import sicherheitsdialog
 import os
+from utils.helpers import ensure_views
 
 DB_PATH = "data/laufende_liste.db"
+
+ensure_views()
 
 # Trigger-Mechanismus für Refresh
 if st.session_state.pop("__trigger_refresh__", False):

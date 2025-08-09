@@ -5,6 +5,9 @@ import unicodedata
 from utils.logger import log_import
 import os
 from typing import List, Tuple
+import sqlite3
+
+DB_PATH = "data/laufende_liste.db"
 
 def get_env_var(key: str) -> str:
     return os.getenv(key, "")
@@ -197,3 +200,31 @@ def clean_trailing_empty_tokens(tokens: list[str], expected_len: int) -> list[st
     while len(tokens) > expected_len and tokens[-1] == '':
         tokens = tokens[:-1]
     return tokens
+def ensure_views():
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.executescript("""
+        CREATE VIEW IF NOT EXISTS v_bewegung AS
+        SELECT
+          id, pharmacode, artikel_bezeichnung, liste, datum,
+          ein_mge, ein_pack, eingang,
+          aus_mge, aus_pack, ausgang,
+          COALESCE(eingang,0) - COALESCE(ausgang,0) AS total,
+          name, vorname, lieferant, prirez, faktura_nummer, quelle, bemerkung,
+          created_at, updated_at
+        FROM bewegungen;
+
+        CREATE VIEW IF NOT EXISTS v_bestand AS
+        SELECT
+          TRIM(artikel_bezeichnung) AS artikel_bezeichnung,
+          COUNT(DISTINCT pharmacode) AS pharmacode_count,
+          MIN(pharmacode) AS sample_pharmacode,
+          MAX(datum) AS letzte_bewegung,
+          SUM(COALESCE(eingang,0)) AS total_eingang,
+          SUM(COALESCE(ausgang,0)) AS total_ausgang,
+          SUM(COALESCE(eingang,0)) - SUM(COALESCE(ausgang,0)) AS saldo
+        FROM bewegungen
+        WHERE artikel_bezeichnung IS NOT NULL AND TRIM(artikel_bezeichnung) <> ''
+        GROUP BY TRIM(artikel_bezeichnung);
+        """)
+        conn.commit()
